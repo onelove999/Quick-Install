@@ -403,6 +403,118 @@ do_show_docker_logs() {
     press_enter
 }
 
+do_stop_node() {
+    header "Остановка ноды"
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        error "Файл $COMPOSE_FILE не найден!"
+        press_enter
+        return
+    fi
+    info "Остановка и удаление контейнеров..."
+    cd "$REMNA_DIR" && docker compose down
+    success "Нода остановлена."
+    press_enter
+}
+
+do_restart_node() {
+    header "Перезапуск ноды"
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        error "Файл $COMPOSE_FILE не найден!"
+        press_enter
+        return
+    fi
+    info "Перезапуск (down + up)..."
+    cd "$REMNA_DIR" && docker compose down && docker compose up -d
+    success "Нода перезапущена."
+    press_enter
+}
+
+# ═══════════════════════════════════════════════════════════════
+# 4.2 ЗАГРУЗКА И ОБНОВЛЕНИЕ GEO ФАЙЛОВ
+# ═══════════════════════════════════════════════════════════════
+do_download_geo() {
+    header "Загрузка/Обновление Geo файлов"
+
+    # 1. Запросить ссылку
+    read -rp "$(printf "${CYAN}Введите ссылку на geo файл (например, https://.../geosite.dat): ${NC}")" geo_url
+    if [ -z "$geo_url" ]; then
+        error "Ссылка не может быть пустой!"
+        press_enter
+        return
+    fi
+
+    # 2. Скачать и добавить в папку
+    local geo_dir="${REMNA_DIR}/geo"
+    mkdir -p "$geo_dir"
+    
+    # Получаем имя файла из ссылки (убираем параметры ?x=y если есть)
+    local filename
+    filename=$(basename "${geo_url%%\?*}")
+    if [ -z "$filename" ]; then
+        error "Не удалось определить имя файла."
+        press_enter
+        return
+    fi
+
+    info "Скачивание $filename в $geo_dir..."
+    if ! wget -qO "${geo_dir}/${filename}" "$geo_url"; then
+        error "Ошибка при скачивании файла!"
+        press_enter
+        return
+    fi
+    success "Файл $filename успешно скачан."
+
+    # 3. Прописать в docker-compose.yml
+    if [ -f "$COMPOSE_FILE" ]; then
+        if grep -q "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
+            info "Volume для $filename уже прописан."
+            read -rp "$(printf "${YELLOW}Перезапустить контейнер для применения обновлённого файла? [y/N]: ${NC}")" restart_confirm
+            if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
+                info "Перезапуск контейнера..."
+                cd "$REMNA_DIR" && docker compose down && docker compose up -d
+                success "Контейнер перезапущен."
+            else
+                info "Перезапуск пропущен."
+            fi
+        else
+            read -rp "$(printf "${CYAN}Укажите путь внутри контейнера для монтирования [По умолчанию: /usr/local/share/xray]: ${NC}")" container_path
+            container_path=${container_path:-/usr/local/share/xray}
+            container_path="${container_path%/}"
+
+            local volume_mapping="${geo_dir}/${filename}:${container_path}/${filename}:ro"
+            info "Добавляю $filename в volumes..."
+
+            # Пытаемся найти блок volumes:
+            if grep -E -q '^[ \t]+volumes:' "$COMPOSE_FILE"; then
+                awk -v vol="      - \"${volume_mapping}\"" '/^[ \t]+volumes:/ && !done { print; print vol; done=1; next } 1' "$COMPOSE_FILE" > "${COMPOSE_FILE}.tmp" && mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE"
+            elif grep -q "SECRET_KEY" "$COMPOSE_FILE"; then
+                sed -i "/SECRET_KEY/a \\    volumes:\\n      - \"${volume_mapping}\"" "$COMPOSE_FILE"
+            elif grep -q "image:" "$COMPOSE_FILE"; then
+                sed -i "/image:/a \\    volumes:\\n      - \"${volume_mapping}\"" "$COMPOSE_FILE"
+            else
+                warn "Не найдено место для автоматического добавления volume."
+                warn "Добавьте строку '- \"${volume_mapping}\"' в docker-compose.yml вручную."
+            fi
+
+            if grep -q "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
+                success "Настройки docker-compose.yml обновлены."
+                read -rp "$(printf "${YELLOW}Перезапустить контейнер для применения изменений? [y/N]: ${NC}")" restart_confirm
+                if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
+                    info "Перезапуск контейнера..."
+                    cd "$REMNA_DIR" && docker compose down && docker compose up -d
+                    success "Контейнер перезапущен."
+                else
+                    info "Перезапуск пропущен."
+                fi
+            fi
+        fi
+    else
+        warn "Конфигурация docker-compose.yml не найдена."
+    fi
+
+    press_enter
+}
+
 do_show_access_logs() {
     header "Логи подключений (access.log)"
     local log_file="/var/log/remnanode/access.log"
@@ -421,13 +533,25 @@ menu_node() {
     while true; do
         clear
         header "Управление Нодой"
+        
+        printf "${BLUE}─── Установка и Обновление ──────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} Установка ноды (Docker + Compose)\n"
         printf "${BOLD}  2)${NC} 🔄  Обновить ноду (Docker Pull)\n"
-        printf "${BOLD}  3)${NC} 📋  Настройка логов (Logrotate)\n"
-        printf "${BOLD}  4)${NC} 🐕  Установка Watchdog (Мониторинг)\n"
-        printf "${BOLD}  5)${NC} ▶️   Запуск и логи контейнера\n"
+        echo ""
+        printf "${BLUE}─── Управление состоянием ───────────────────────────${NC}\n"
+        printf "${BOLD}  3)${NC} ▶️   Запустить (с логами)\n"
+        printf "${BOLD}  4)${NC} 🔄  Перезапустить\n"
+        printf "${BOLD}  5)${NC} 🛑  Остановить\n"
+        echo ""
+        printf "${BLUE}─── Логи и Мониторинг ───────────────────────────────${NC}\n"
         printf "${BOLD}  6)${NC} 📊  Только логи контейнера\n"
         printf "${BOLD}  7)${NC} 🌐  Логи подключений (access.log)\n"
+        printf "${BOLD}  8)${NC} 📋  Настройка логов (Logrotate)\n"
+        printf "${BOLD}  9)${NC} 🐕  Установка Watchdog (Мониторинг)\n"
+        echo ""
+        printf "${BLUE}─── Дополнительно ───────────────────────────────────${NC}\n"
+        printf "${BOLD} 10)${NC} 🌍  Загрузить/Обновить Geo файлы\n"
+        echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
@@ -435,11 +559,14 @@ menu_node() {
         case "$choice" in
             1) do_install_node ;;
             2) do_update_node ;;
-            3) do_install_logs ;;
-            4) do_install_watchdog ;;
-            5) do_start_node ;;
+            3) do_start_node ;;
+            4) do_restart_node ;;
+            5) do_stop_node ;;
             6) do_show_docker_logs ;;
             7) do_show_access_logs ;;
+            8) do_install_logs ;;
+            9) do_install_watchdog ;;
+            10) do_download_geo ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
@@ -668,7 +795,11 @@ EOF
             info "Volume для логов уже есть в docker-compose.yml."
         else
             info "Добавляю volume в docker-compose.yml..."
-            sed -i '/SECRET_KEY/a \    volumes:\n      - "/var/log/remnanode:/var/log/remnanode"' "$COMPOSE_FILE"
+            if grep -E -q '^[ \t]+volumes:' "$COMPOSE_FILE"; then
+                awk -v vol="      - \"/var/log/remnanode:/var/log/remnanode\"" '/^[ \t]+volumes:/ && !done { print; print vol; done=1; next } 1' "$COMPOSE_FILE" > "${COMPOSE_FILE}.tmp" && mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE"
+            else
+                sed -i '/SECRET_KEY/a \    volumes:\n      - "/var/log/remnanode:/var/log/remnanode"' "$COMPOSE_FILE"
+            fi
             success "Volume добавлен."
         fi
 
