@@ -20,6 +20,8 @@ NC='\033[0m'
 REMNA_DIR="/opt/remnanode"
 LOG_DIR="/var/log/remnanode"
 COMPOSE_FILE="${REMNA_DIR}/docker-compose.yml"
+AGH_DIR="/opt/adguardhome"
+
 
 # Watchdog — данные запрашиваются при установке
 
@@ -429,6 +431,20 @@ do_restart_node() {
     press_enter
 }
 
+do_edit_node_compose() {
+    header "Редактирование docker-compose.yml"
+    if [ ! -f "$COMPOSE_FILE" ]; then
+        error "Файл $COMPOSE_FILE не найден!"
+        press_enter
+        return
+    fi
+    info "Открываю nano для редактирования $COMPOSE_FILE..."
+    sleep 1
+    nano "$COMPOSE_FILE"
+    success "Редактирование завершено."
+    press_enter
+}
+
 # ═══════════════════════════════════════════════════════════════
 # 4.2 ЗАГРУЗКА И ОБНОВЛЕНИЕ GEO ФАЙЛОВ
 # ═══════════════════════════════════════════════════════════════
@@ -537,20 +553,21 @@ menu_node() {
         printf "${BLUE}─── Установка и Обновление ──────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} Установка ноды (Docker + Compose)\n"
         printf "${BOLD}  2)${NC} 🔄  Обновить ноду (Docker Pull)\n"
+        printf "${BOLD}  3)${NC} 📝  Редактировать docker-compose.yml\n"
         echo ""
         printf "${BLUE}─── Управление состоянием ───────────────────────────${NC}\n"
-        printf "${BOLD}  3)${NC} ▶️   Запустить (с логами)\n"
-        printf "${BOLD}  4)${NC} 🔄  Перезапустить\n"
-        printf "${BOLD}  5)${NC} 🛑  Остановить\n"
+        printf "${BOLD}  4)${NC} ▶️   Запустить (с логами)\n"
+        printf "${BOLD}  5)${NC} 🔄  Перезапустить\n"
+        printf "${BOLD}  6)${NC} 🛑  Остановить\n"
         echo ""
         printf "${BLUE}─── Логи и Мониторинг ───────────────────────────────${NC}\n"
-        printf "${BOLD}  6)${NC} 📊  Только логи контейнера\n"
-        printf "${BOLD}  7)${NC} 🌐  Логи подключений (access.log)\n"
-        printf "${BOLD}  8)${NC} 📋  Настройка логов (Logrotate)\n"
-        printf "${BOLD}  9)${NC} 🐕  Установка Watchdog (Мониторинг)\n"
+        printf "${BOLD}  7)${NC} 📊  Только логи контейнера\n"
+        printf "${BOLD}  8)${NC} 🌐  Логи подключений (access.log)\n"
+        printf "${BOLD}  9)${NC} 📋  Настройка логов (Logrotate)\n"
+        printf "${BOLD} 10)${NC} 🐕  Установка Watchdog (Мониторинг)\n"
         echo ""
         printf "${BLUE}─── Дополнительно ───────────────────────────────────${NC}\n"
-        printf "${BOLD} 10)${NC} 🌍  Загрузить/Обновить Geo файлы\n"
+        printf "${BOLD} 11)${NC} 🌍  Загрузить/Обновить Geo файлы\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -559,14 +576,15 @@ menu_node() {
         case "$choice" in
             1) do_install_node ;;
             2) do_update_node ;;
-            3) do_start_node ;;
-            4) do_restart_node ;;
-            5) do_stop_node ;;
-            6) do_show_docker_logs ;;
-            7) do_show_access_logs ;;
-            8) do_install_logs ;;
-            9) do_install_watchdog ;;
-            10) do_download_geo ;;
+            3) do_edit_node_compose ;;
+            4) do_start_node ;;
+            5) do_restart_node ;;
+            6) do_stop_node ;;
+            7) do_show_docker_logs ;;
+            8) do_show_access_logs ;;
+            9) do_install_logs ;;
+            10) do_install_watchdog ;;
+            11) do_download_geo ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
@@ -752,6 +770,46 @@ EOF
     fi
     press_enter
 }
+
+# ═══════════════════════════════════════════════════════════════
+# 5.5 НАСТРОЙКА SWAP
+# ═══════════════════════════════════════════════════════════════
+do_setup_swap() {
+    header "Настройка SWAP"
+    
+    # Запрос размера SWAP
+    read -rp "$(printf "${CYAN}Введите размер SWAP в ГБ [По умолчанию: 1]: ${NC}")" swap_gb
+    swap_gb=${swap_gb:-1}
+    
+    # Проверка на число
+    if [[ ! "$swap_gb" =~ ^[0-9]+$ ]]; then
+        error "Размер должен быть числом!"
+        press_enter
+        return
+    fi
+
+    info "Настройка SWAP файла на ${swap_gb}GB..."
+    
+    # Команда настройки
+    swapoff /swapfile 2>/dev/null || true
+    if fallocate -l "${swap_gb}G" /swapfile; then
+        chmod 600 /swapfile
+        mkswap /swapfile
+        swapon /swapfile
+        
+        # Добавление в fstab если нет
+        if ! grep -qE '^/swapfile\s' /etc/fstab; then
+            echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+        fi
+        
+        success "SWAP на ${swap_gb}GB успешно настроен и активирован."
+    else
+        error "Не удалось создать swap-файл. Проверьте свободное место."
+    fi
+    
+    press_enter
+}
+
 
 # ═══════════════════════════════════════════════════════════════
 # 6. УСТАНОВКА ЛОГОВ
@@ -1372,6 +1430,118 @@ menu_warp() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# 9.2 УПРАВЛЕНИЕ ADGUARD HOME
+# ═══════════════════════════════════════════════════════════════
+
+do_install_adguard() {
+    header "Установка AdGuard Home"
+
+    # 1. Подготовка папок
+    info "Создание директорий: ${AGH_DIR}/workdir, ${AGH_DIR}/confdir..."
+    mkdir -p "${AGH_DIR}/workdir" "${AGH_DIR}/confdir"
+    
+    # 2. Создание docker-compose.yml
+    info "Создание docker-compose.yml..."
+    cat > "${AGH_DIR}/docker-compose.yml" <<EOF
+services:
+  adguardhome:
+    image: adguard/adguardhome
+    container_name: adguardhome
+    restart: unless-stopped
+    ports:
+      # DNS выводим в сеть Docker (чтобы Xray его увидел)
+      - "172.17.0.1:5353:53/tcp"
+      - "172.17.0.1:5353:53/udp"
+      # Порт для мастера первоначальной настройки (скрыт от интернета)
+      - "127.0.0.1:3000:3000/tcp"
+      # Порт для самой веб-панели (скрыт от интернета)
+      - "127.0.0.1:8080:80/tcp"
+    volumes:
+      - ./workdir:/opt/adguardhome/work
+      - ./confdir:/opt/adguardhome/conf
+EOF
+
+    # 3. Редактирование AdGuardHome.yaml
+    info "Сейчас откроется nano для редактирования AdGuardHome.yaml"
+    info "Вставьте ваш конфиг и сохраните (Ctrl+O, Enter, Ctrl+X)"
+    sleep 2
+    nano "${AGH_DIR}/confdir/AdGuardHome.yaml"
+
+    # 4. Запуск
+    info "Запуск контейнера..."
+    cd "${AGH_DIR}" && docker compose up -d
+    
+    success "AdGuard Home установлен и запущен."
+    press_enter
+}
+
+do_start_adguard() {
+    header "Запуск AdGuard Home"
+    cd "${AGH_DIR}" && docker compose up -d
+    success "Выполнено."
+    press_enter
+}
+
+do_stop_adguard() {
+    header "Остановка AdGuard Home"
+    cd "${AGH_DIR}" && docker compose stop
+    success "Выполнено."
+    press_enter
+}
+
+do_restart_adguard() {
+    header "Перезапуск AdGuard Home"
+    cd "${AGH_DIR}" && docker compose restart
+    success "Выполнено."
+    press_enter
+}
+
+do_logs_adguard() {
+    header "Логи AdGuard Home"
+    cd "${AGH_DIR}" && docker compose logs -f --tail=100
+    press_enter
+}
+
+do_edit_adguard_yaml() {
+    header "Редактирование AdGuardHome.yaml"
+    if [ -f "${AGH_DIR}/confdir/AdGuardHome.yaml" ]; then
+        nano "${AGH_DIR}/confdir/AdGuardHome.yaml"
+        success "Редактирование завершено."
+    else
+        error "Файл конфигурации не найден!"
+    fi
+    press_enter
+}
+
+menu_adguard() {
+    while true; do
+        clear
+        header "Управление AdGuard Home"
+        printf "${BOLD}  1)${NC} 🛠️  Установить AdGuard Home (с нуля)\n"
+        printf "${BOLD}  2)${NC} ▶️  Запустить\n"
+        printf "${BOLD}  3)${NC} 🛑  Остановить\n"
+        printf "${BOLD}  4)${NC} 🔄  Перезапустить\n"
+        printf "${BOLD}  5)${NC} 📊  Показать логи\n"
+        printf "${BOLD}  6)${NC} 📝  Редактировать AdGuardHome.yaml\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_install_adguard ;;
+            2) do_start_adguard ;;
+            3) do_stop_adguard ;;
+            4) do_restart_adguard ;;
+            5) do_logs_adguard ;;
+            6) do_edit_adguard_yaml ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
 # 9.5 TRAFFICGUARD PRO MANAGER
 # ═══════════════════════════════════════════════════════════════
 do_trafficguard() {
@@ -1469,19 +1639,19 @@ main_menu() {
         printf "${BLUE}─── Система и Оптимизация ───────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} 📦  Обновление системы (APT upgrade)\n"
         printf "${BOLD}  2)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
+        printf "${BOLD}  3)${NC} 💾  Настройка SWAP\n"
         echo ""
         printf "${BLUE}─── Управление Сервисами ────────────────────────────${NC}\n"
-        printf "${BOLD}  3)${NC} 🐳  Управление Нодой\n"
-        printf "${BOLD}  4)${NC} 📊  Установка Beszel Agent\n"
-        printf "${BOLD}  7)${NC} 🧪  Тесты и Бенчмарки\n"
-        echo ""
-        printf "${BLUE}─── Безопасность ────────────────────────────────────${NC}\n"
-        printf "${BOLD}  5)${NC} 🔥  Настройка Фаервола (UFW)\n"
-        printf "${BOLD}  6)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
-        printf "${BOLD}  8)${NC} 🛡️  Trafficguard Pro Manager\n"
+        printf "${BOLD}  4)${NC} 🐳  Управление Нодой\n"
+        printf "${BOLD}  5)${NC} 📊  Установка Beszel Agent\n"
+        printf "${BOLD}  6)${NC} 🛡️  Управление AdGuard Home\n"
+        printf "${BOLD}  7)${NC} 🔥  Настройка Фаервола (UFW)\n"
+        printf "${BOLD}  8)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
+        printf "${BOLD}  9)${NC} 🛡️  Trafficguard Pro Manager\n"
+        printf "${BOLD} 10)${NC} 🧪  Тесты и Бенчмарки\n"
         echo ""
         printf "${BLUE}─── Автоматизация ───────────────────────────────────${NC}\n"
-        printf "${BOLD} 10)${NC} 🔧  ПОЛНАЯ УСТАНОВКА (Система + UFW + Нода + Безель)\n"
+        printf "${BOLD} 11)${NC} 🔧  ПОЛНАЯ УСТАНОВКА (Система + UFW + Нода + Безель)\n"
         echo ""
         printf "${BOLD}  0)${NC} ❌  Выход\n"
         echo ""
@@ -1490,13 +1660,15 @@ main_menu() {
         case "$choice" in
             1) do_update ;;
             2) do_install_bbr ;;
-            3) menu_node ;;
-            4) do_install_beszel ;;
-            5) menu_ufw ;;
-            6) menu_warp ;;
-            7) menu_tests ;;
-            8) do_trafficguard ;;
-            10) do_full_install ;;
+            3) do_setup_swap ;;
+            4) menu_node ;;
+            5) do_install_beszel ;;
+            6) menu_adguard ;;
+            7) menu_ufw ;;
+            8) menu_warp ;;
+            9) do_trafficguard ;;
+            10) menu_tests ;;
+            11) do_full_install ;;
             0) echo ""; info "До свидания!"; exit 0 ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
