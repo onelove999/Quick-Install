@@ -777,8 +777,23 @@ EOF
 do_setup_swap() {
     header "Настройка SWAP"
     
+    # Показ текущего значения
+    local current_swap
+    current_swap=$(free -h | awk '/Swap:/ {print $2}')
+    info "Текущий размер SWAP в системе: ${BOLD}${current_swap}${NC}"
+    echo ""
+
+    # Запрос на изменение
+    read -rp "$(printf "${YELLOW}Хотите изменить размер или пересоздать SWAP? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Настройки оставлены без изменений."
+        press_enter
+        return
+    fi
+
+    echo ""
     # Запрос размера SWAP
-    read -rp "$(printf "${CYAN}Введите размер SWAP в ГБ [По умолчанию: 1]: ${NC}")" swap_gb
+    read -rp "$(printf "${CYAN}Введите новый размер SWAP в ГБ [По умолчанию: 1]: ${NC}")" swap_gb
     swap_gb=${swap_gb:-1}
     
     # Проверка на число
@@ -809,6 +824,7 @@ do_setup_swap() {
     
     press_enter
 }
+
 
 # ═══════════════════════════════════════════════════════════════
 # 5.6 УПРАВЛЕНИЕ IPv6
