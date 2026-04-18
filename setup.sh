@@ -810,6 +810,99 @@ do_setup_swap() {
     press_enter
 }
 
+# ═══════════════════════════════════════════════════════════════
+# 5.6 УПРАВЛЕНИЕ IPv6
+# ═══════════════════════════════════════════════════════════════
+
+do_check_ipv6_status() {
+    header "Статус IPv6"
+    
+    local sysctl_val
+    sysctl_val=$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)
+    
+    info "Параметр ядра (disable_ipv6): $sysctl_val"
+    if [ "$sysctl_val" = "1" ]; then
+        warn "IPv6 отключен в параметрах ядра."
+    else
+        success "IPv6 включен в параметрах ядра."
+    fi
+
+    echo ""
+    info "Активные IPv6 адреса на интерфейсах (ip a):"
+    local ipv6_addrs
+    ipv6_addrs=$(ip -6 a | grep "inet6" | grep -v "fe80" || true)
+    
+    if [ -z "$ipv6_addrs" ]; then
+        warn "Глобальные IPv6 адреса не найдены."
+        printf "${GREEN}Вердикт: Только IPv4 (IPv6 неактивен)${NC}\n"
+    else
+        echo "$ipv6_addrs"
+        printf "${CYAN}Вердикт: IPv6 активен${NC}\n"
+    fi
+    press_enter
+}
+
+do_disable_ipv6() {
+    header "Отключение IPv6"
+    local conf_file="/etc/sysctl.d/99-disable-ipv6.conf"
+    
+    info "Создание $conf_file..."
+    cat > "$conf_file" <<EOF
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+
+    info "Применение параметров sysctl..."
+    sysctl -p "$conf_file" > /dev/null 2>&1
+    
+    success "IPv6 отключен. Проверяем..."
+    sleep 1
+    ip a | grep -q "inet6" && warn "Замечены остаточные inet6 адреса. Возможно, требуется перезапуск сети или перезагрузка." || success "IPv6 адреса исчезли."
+    press_enter
+}
+
+do_enable_ipv6() {
+    header "Включение IPv6"
+    local conf_file="/etc/sysctl.d/99-disable-ipv6.conf"
+    
+    if [ -f "$conf_file" ]; then
+        info "Удаление $conf_file..."
+        rm "$conf_file"
+    fi
+
+    info "Включение IPv6 через sysctl -w..."
+    sysctl -w net.ipv6.conf.all.disable_ipv6=0 > /dev/null 2>&1
+    sysctl -w net.ipv6.conf.default.disable_ipv6=0 > /dev/null 2>&1
+    sysctl -w net.ipv6.conf.lo.disable_ipv6=0 > /dev/null 2>&1
+    
+    success "Параметры сброшены. IPv6 должен быть доступен."
+    press_enter
+}
+
+menu_ipv6() {
+    while true; do
+        clear
+        header "Управление IPv6"
+        printf "${BOLD}  1)${NC} 📊  Статус IPv6\n"
+        printf "${BOLD}  2)${NC} 🛑  Отключить IPv6\n"
+        printf "${BOLD}  3)${NC} ✅  Включить IPv6\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_check_ipv6_status ;;
+            2) do_disable_ipv6 ;;
+            3) do_enable_ipv6 ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+
 
 # ═══════════════════════════════════════════════════════════════
 # 6. УСТАНОВКА ЛОГОВ
@@ -1651,6 +1744,34 @@ do_full_install() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# УПРАВЛЕНИЕ СЕРВЕРОМ
+# ═══════════════════════════════════════════════════════════════
+menu_server() {
+    while true; do
+        clear
+        header "Управление сервером"
+        printf "${BLUE}─── Основные настройки ──────────────────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} 📦  Обновление системы (APT upgrade)\n"
+        printf "${BOLD}  2)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
+        printf "${BOLD}  3)${NC} 💾  Настройка SWAP\n"
+        printf "${BOLD}  4)${NC} 🌐  Управление IPv6\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_update ;;
+            2) do_install_bbr ;;
+            3) do_setup_swap ;;
+            4) menu_ipv6 ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+# ═══════════════════════════════════════════════════════════════
 # ГЛАВНОЕ МЕНЮ
 # ═══════════════════════════════════════════════════════════════
 main_menu() {
@@ -1664,39 +1785,33 @@ main_menu() {
         echo "  └─────────────────────────────────────────────┘"
         printf "${NC}\n"
 
-        printf "${BLUE}─── Система и Оптимизация ───────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} 📦  Обновление системы (APT upgrade)\n"
-        printf "${BOLD}  2)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
-        printf "${BOLD}  3)${NC} 💾  Настройка SWAP\n"
-        echo ""
-        printf "${BLUE}─── Управление Сервисами ────────────────────────────${NC}\n"
-        printf "${BOLD}  4)${NC} 🐳  Управление Нодой\n"
-        printf "${BOLD}  5)${NC} 📊  Установка Beszel Agent\n"
-        printf "${BOLD}  6)${NC} 🛡️  Управление AdGuard Home\n"
-        printf "${BOLD}  7)${NC} 🔥  Настройка Фаервола (UFW)\n"
-        printf "${BOLD}  8)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
-        printf "${BOLD}  9)${NC} 🛡️  Trafficguard Pro Manager\n"
-        printf "${BOLD} 10)${NC} 🧪  Тесты и Бенчмарки\n"
+        printf "${BLUE}─── Основные разделы ────────────────────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} 🛠️  Управление сервером\n"
+        printf "${BOLD}  2)${NC} 🐳  Управление Нодой\n"
+        printf "${BOLD}  3)${NC} 📊  Установка Beszel Agent\n"
+        printf "${BOLD}  4)${NC} 🛡️  Управление AdGuard Home\n"
+        printf "${BOLD}  5)${NC} 🔥  Настройка Фаервола (UFW)\n"
+        printf "${BOLD}  6)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
+        printf "${BOLD}  7)${NC} 🛡️  Trafficguard Pro Manager\n"
+        printf "${BOLD}  8)${NC} 🧪  Тесты и Бенчмарки\n"
         echo ""
         printf "${BLUE}─── Автоматизация ───────────────────────────────────${NC}\n"
-        printf "${BOLD} 11)${NC} 🔧  ПОЛНАЯ УСТАНОВКА (Система + UFW + Нода + Безель)\n"
+        printf "${BOLD}  9)${NC} 🔧  ПОЛНАЯ УСТАНОВКА (Система + UFW + Нода + Безель)\n"
         echo ""
         printf "${BOLD}  0)${NC} ❌  Выход\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
 
         case "$choice" in
-            1) do_update ;;
-            2) do_install_bbr ;;
-            3) do_setup_swap ;;
-            4) menu_node ;;
-            5) do_install_beszel ;;
-            6) menu_adguard ;;
-            7) menu_ufw ;;
-            8) menu_warp ;;
-            9) do_trafficguard ;;
-            10) menu_tests ;;
-            11) do_full_install ;;
+            1) menu_server ;;
+            2) menu_node ;;
+            3) do_install_beszel ;;
+            4) menu_adguard ;;
+            5) menu_ufw ;;
+            6) menu_warp ;;
+            7) do_trafficguard ;;
+            8) menu_tests ;;
+            9) do_full_install ;;
             0) echo ""; info "До свидания!"; exit 0 ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
