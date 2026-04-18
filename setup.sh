@@ -918,6 +918,67 @@ menu_ipv6() {
     done
 }
 
+# ═══════════════════════════════════════════════════════════════
+# 5.7 ПРОДВИНУТЫЙ СЕТЕВОЙ ТЮНИНГ
+# ═══════════════════════════════════════════════════════════════
+
+do_network_tuning() {
+    header "Настройка сети ядра для VPN"
+    local conf_file="/etc/sysctl.d/99-vpn-tuning.conf"
+
+    if [ -f "$conf_file" ]; then
+        success "Тюнинг в данный момент АКТИВИРОВАН (файл найден)."
+        echo ""
+        read -rp "$(printf "${YELLOW}Вы хотите ОТКЛЮЧИТЬ тюнинг и удалить настройки? [y/N]: ${NC}")" confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            rm -f "$conf_file"
+            info "Сброс параметров через sysctl --system..."
+            sysctl --system > /dev/null 2>&1
+            success "Тюнинг успешно отключен, файл настроек удален."
+        else
+            info "Действие отменено."
+        fi
+    else
+        warn "Тюнинг в данный момент НЕ АКТИВИРОВАН."
+        echo ""
+        info "Будут применены следующие параметры:"
+        echo "  - net.core.default_qdisc=fq"
+        echo "  - net.ipv4.tcp_congestion_control=bbr"
+        echo "  - Увеличение буферов TCP (rmem/wmem) до 64МБ"
+        echo "  - Оптимизация очередей (backlog, somaxconn)"
+        echo "  - Включение TCP FastOpen и MTU Probing"
+        echo ""
+        read -rp "$(printf "${CYAN}Вы хотите ВКЛЮЧИТЬ продвинутый тюнинг? [y/N]: ${NC}")" confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            info "Запись параметров в $conf_file..."
+            cat > "$conf_file" <<EOF
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+net.core.netdev_max_backlog=250000
+net.core.somaxconn=4096
+net.ipv4.tcp_fastopen=3
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+net.ipv4.tcp_mtu_probing=1
+EOF
+            info "Применение сетевых параметров..."
+            sysctl --system > /dev/null 2>&1
+            success "Сетевые параметры успешно применены!"
+        else
+            info "Действие отменено."
+        fi
+    fi
+    press_enter
+}
+
+
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1771,6 +1832,7 @@ menu_server() {
         printf "${BOLD}  2)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
         printf "${BOLD}  3)${NC} 💾  Настройка SWAP\n"
         printf "${BOLD}  4)${NC} 🌐  Управление IPv6\n"
+        printf "${BOLD}  5)${NC} 🚀  Продвинутый тюнинг сети (VPN)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -1781,6 +1843,7 @@ menu_server() {
             2) do_install_bbr ;;
             3) do_setup_swap ;;
             4) menu_ipv6 ;;
+            5) do_network_tuning ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
