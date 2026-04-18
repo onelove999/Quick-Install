@@ -1513,6 +1513,32 @@ do_edit_adguard_yaml() {
     press_enter
 }
 
+do_overwrite_adguard_yaml() {
+    header "Перезапись AdGuardHome.yaml"
+    warn "Это действие полностью ОЧИСТИТ текущий конфиг!"
+    read -rp "$(printf "${YELLOW}Вы уверены, что хотите продолжить? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
+    local yaml_path="${AGH_DIR}/confdir/AdGuardHome.yaml"
+    
+    # Очищаем файл
+    : > "$yaml_path"
+    info "Файл очищен. Сейчас откроется nano..."
+    sleep 1
+    nano "$yaml_path"
+    
+    info "Перезапуск контейнера для применения нового конфига..."
+    cd "${AGH_DIR}" && docker compose restart
+    
+    success "Конфигурация обновлена и AdGuard Home перезапущен."
+    press_enter
+}
+
+
 menu_adguard() {
     while true; do
         clear
@@ -1523,6 +1549,7 @@ menu_adguard() {
         printf "${BOLD}  4)${NC} 🔄  Перезапустить\n"
         printf "${BOLD}  5)${NC} 📊  Показать логи\n"
         printf "${BOLD}  6)${NC} 📝  Редактировать AdGuardHome.yaml\n"
+        printf "${BOLD}  7)${NC} 🧨  ПЕРЕЗАПИСАТЬ AdGuardHome.yaml (Очистить)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -1535,6 +1562,7 @@ menu_adguard() {
             4) do_restart_adguard ;;
             5) do_logs_adguard ;;
             6) do_edit_adguard_yaml ;;
+            7) do_overwrite_adguard_yaml ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
