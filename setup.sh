@@ -26,10 +26,10 @@ AGH_DIR="/opt/adguardhome"
 # Watchdog — данные запрашиваются при установке
 
 # ─── Вспомогательные функции ─────────────────────────────────
-info()    { printf "${CYAN}[INFO]${NC} %s\n" "$*"; }
-success() { printf "${GREEN}[✔]${NC} %s\n" "$*"; }
-warn()    { printf "${YELLOW}[⚠]${NC} %s\n" "$*"; }
-error()   { printf "${RED}[✘]${NC} %s\n" "$*"; }
+info()    { printf "${CYAN}[INFO]${NC} %b\n" "$*"; }
+success() { printf "${GREEN}[✔]${NC} %b\n" "$*"; }
+warn()    { printf "${YELLOW}[⚠]${NC} %b\n" "$*"; }
+error()   { printf "${RED}[✘]${NC} %b\n" "$*"; }
 
 header() {
     echo ""
