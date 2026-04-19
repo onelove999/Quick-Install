@@ -550,41 +550,39 @@ menu_node() {
         clear
         header "Управление Нодой"
         
-        printf "${BLUE}─── Установка и Обновление ──────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Установка ноды (Docker + Compose)\n"
-        printf "${BOLD}  2)${NC} 🔄  Обновить ноду (Docker Pull)\n"
-        printf "${BOLD}  3)${NC} 📝  Редактировать docker-compose.yml\n"
+        printf "${BLUE}─── Операции ────────────────────────────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} ▶️   Запустить (с логами)\n"
+        printf "${BOLD}  2)${NC} 🔄  Перезапустить\n"
+        printf "${BOLD}  3)${NC} 🛑  Остановить\n"
+        printf "${BOLD}  4)${NC} 📊  Только логи контейнера\n"
+        printf "${BOLD}  5)${NC} 🌐  Логи подключений (access.log)\n"
         echo ""
-        printf "${BLUE}─── Управление состоянием ───────────────────────────${NC}\n"
-        printf "${BOLD}  4)${NC} ▶️   Запустить (с логами)\n"
-        printf "${BOLD}  5)${NC} 🔄  Перезапустить\n"
-        printf "${BOLD}  6)${NC} 🛑  Остановить\n"
+        printf "${BLUE}─── Настройка ───────────────────────────────────────${NC}\n"
+        printf "${BOLD}  6)${NC} 🛠️  Установка ноды (Docker + Compose)\n"
+        printf "${BOLD}  7)${NC} 🔄  Обновить ноду (Docker Pull)\n"
+        printf "${BOLD}  8)${NC} 📝  Редактировать docker-compose.yml\n"
+        printf "${BOLD}  9)${NC} 🌍  Загрузить/Обновить Geo файлы\n"
         echo ""
-        printf "${BLUE}─── Логи и Мониторинг ───────────────────────────────${NC}\n"
-        printf "${BOLD}  7)${NC} 📊  Только логи контейнера\n"
-        printf "${BOLD}  8)${NC} 🌐  Логи подключений (access.log)\n"
-        printf "${BOLD}  9)${NC} 📋  Настройка логов (Logrotate)\n"
-        printf "${BOLD} 10)${NC} 🐕  Установка Watchdog (Мониторинг)\n"
-        echo ""
-        printf "${BLUE}─── Дополнительно ───────────────────────────────────${NC}\n"
-        printf "${BOLD} 11)${NC} 🌍  Загрузить/Обновить Geo файлы\n"
+        printf "${BLUE}─── Автоматизация ───────────────────────────────────${NC}\n"
+        printf "${BOLD} 10)${NC} 📋  Настройка логов (Logrotate)\n"
+        printf "${BOLD} 11)${NC} 🐕  Установка Watchdog\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
 
         case "$choice" in
-            1) do_install_node ;;
-            2) do_update_node ;;
-            3) do_edit_node_compose ;;
-            4) do_start_node ;;
-            5) do_restart_node ;;
-            6) do_stop_node ;;
-            7) do_show_docker_logs ;;
-            8) do_show_access_logs ;;
-            9) do_install_logs ;;
-            10) do_install_watchdog ;;
-            11) do_download_geo ;;
+            1) do_start_node ;;
+            2) do_restart_node ;;
+            3) do_stop_node ;;
+            4) do_show_docker_logs ;;
+            5) do_show_access_logs ;;
+            6) do_install_node ;;
+            7) do_update_node ;;
+            8) do_edit_node_compose ;;
+            9) do_download_geo ;;
+            10) do_install_logs ;;
+            11) do_install_watchdog ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
@@ -1763,74 +1761,16 @@ do_trafficguard() {
     press_enter
 }
 
-# ═══════════════════════════════════════════════════════════════
-# 8. ПОЛНАЯ УСТАНОВКА
-# ═══════════════════════════════════════════════════════════════
-do_full_install() {
-    header "Полная установка"
-    printf "${BOLD}${YELLOW}Будут выполнены следующие шаги:${NC}\n"
-    echo "  1. Обновление системы (APT)"
-    echo "  2. Установка TCP BBR"
-    echo "  3. Настройка UFW: Запрет пинга (ICMP DROP)"
-    echo "  4. Настройка UFW: Включение + SSH + Rate Limit"
-    echo "  5. Настройка UFW: Открытие порта 443/tcp"
-    echo "  6. Установка ноды (Docker + Compose)"
-    echo "  7. Настройка логов (Logrotate)"
-    echo "  8. Установка Watchdog"
-    echo "  9. Установка Beszel Agent"
-    echo ""
-    read -rp "$(printf "${CYAN}Продолжить? [y/N]: ${NC}")" confirm
-    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-        info "Отменено."
-        press_enter
-        return
-    fi
-
-    # 1. Обновление
-    do_update
-    
-    # 2. BBR
-    do_install_bbr
-    
-    # 3. ICMP DROP
-    info "Настройка ICMP DROP..."
-    ufw_disable_ping
-    
-    # 4. UFW Secure
-    ufw_enable_secure
-    
-    # 5. Port 443
-    info "Открытие порта 443/tcp..."
-    ufw allow 443/tcp
-    
-    # 6. Нода
-    do_install_node
-    
-    # 7. Логи
-    do_install_logs
-    
-    # 8. Watchdog
-    do_install_watchdog
-    
-    # 9. Beszel
-    do_install_beszel
-
-    header "Полная установка завершена!"
-    success "Все компоненты настроены."
-    press_enter
-}
-
-# ═══════════════════════════════════════════════════════════════
-# УПРАВЛЕНИЕ СЕРВЕРОМ
-# ═══════════════════════════════════════════════════════════════
-menu_server() {
+menu_system() {
     while true; do
         clear
-        header "Управление сервером"
-        printf "${BLUE}─── Основные настройки ──────────────────────────────${NC}\n"
+        header "Система и Сеть"
+        printf "${BLUE}─── Базовые настройки ───────────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} 📦  Обновление системы (APT upgrade)\n"
         printf "${BOLD}  2)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
         printf "${BOLD}  3)${NC} 💾  Настройка SWAP\n"
+        echo ""
+        printf "${BLUE}─── Сетевые настройки ───────────────────────────────${NC}\n"
         printf "${BOLD}  4)${NC} 🌐  Управление IPv6\n"
         printf "${BOLD}  5)${NC} 🚀  Продвинутый тюнинг сети (VPN)\n"
         echo ""
@@ -1844,6 +1784,68 @@ menu_server() {
             3) do_setup_swap ;;
             4) menu_ipv6 ;;
             5) do_network_tuning ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+menu_security() {
+    while true; do
+        clear
+        header "Безопасность и Firewall"
+        printf "${BOLD}  1)${NC} 🔥  Настройка Фаервола (UFW)\n"
+        printf "${BOLD}  2)${NC} 🛡️  Trafficguard Pro Manager\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) menu_ufw ;;
+            2) do_trafficguard ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+menu_monitoring() {
+    while true; do
+        clear
+        header "Мониторинг и Логи"
+        printf "${BOLD}  1)${NC} 📊  Beszel Agent (Панель мониторинга)\n"
+        printf "${BOLD}  2)${NC} 🐕  Watchdog (Детектор сканирования)\n"
+        printf "${BOLD}  3)${NC} 📋  Настройка ротации логов (Logrotate)\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_install_beszel ;;
+            2) do_install_watchdog ;;
+            3) do_install_logs ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+menu_apps() {
+    while true; do
+        clear
+        header "Дополнительные сервисы"
+        printf "${BOLD}  1)${NC} 🛡️  AdGuard Home (DNS-фильтрация)\n"
+        printf "${BOLD}  2)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) menu_adguard ;;
+            2) menu_warp ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
@@ -1864,33 +1866,29 @@ main_menu() {
         echo "  └─────────────────────────────────────────────┘"
         printf "${NC}\n"
 
-        printf "${BLUE}─── Основные разделы ────────────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} 🛠️  Управление сервером\n"
-        printf "${BOLD}  2)${NC} 🐳  Управление Нодой\n"
-        printf "${BOLD}  3)${NC} 📊  Установка Beszel Agent\n"
-        printf "${BOLD}  4)${NC} 🛡️  Управление AdGuard Home\n"
-        printf "${BOLD}  5)${NC} 🔥  Настройка Фаервола (UFW)\n"
-        printf "${BOLD}  6)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
-        printf "${BOLD}  7)${NC} 🛡️  Trafficguard Pro Manager\n"
-        printf "${BOLD}  8)${NC} 🧪  Тесты и Бенчмарки\n"
+        printf "${BLUE}─── Управление ──────────────────────────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} ⚙️  Система и Сеть\n"
+        printf "${BOLD}  2)${NC} 🐳  Управление Нодой (Proxy)\n"
         echo ""
-        printf "${BLUE}─── Автоматизация ───────────────────────────────────${NC}\n"
-        printf "${BOLD}  9)${NC} 🔧  ПОЛНАЯ УСТАНОВКА (Система + UFW + Нода + Безель)\n"
+        printf "${BLUE}─── Защита и Мониторинг ─────────────────────────────${NC}\n"
+        printf "${BOLD}  3)${NC} 🛡️  Безопасность и Firewall\n"
+        printf "${BOLD}  4)${NC} 📊  Мониторинг и Логи\n"
+        echo ""
+        printf "${BLUE}─── Дополнительно ───────────────────────────────────${NC}\n"
+        printf "${BOLD}  5)${NC} 🧩  Сторонние сервисы (AdGuard, WARP)\n"
+        printf "${BOLD}  6)${NC} 🧪  Тесты и Бенчмарки\n"
         echo ""
         printf "${BOLD}  0)${NC} ❌  Выход\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
 
         case "$choice" in
-            1) menu_server ;;
+            1) menu_system ;;
             2) menu_node ;;
-            3) do_install_beszel ;;
-            4) menu_adguard ;;
-            5) menu_ufw ;;
-            6) menu_warp ;;
-            7) do_trafficguard ;;
-            8) menu_tests ;;
-            9) do_full_install ;;
+            3) menu_security ;;
+            4) menu_monitoring ;;
+            5) menu_apps ;;
+            6) menu_tests ;;
             0) echo ""; info "До свидания!"; exit 0 ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
