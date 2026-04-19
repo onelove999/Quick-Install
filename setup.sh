@@ -2034,12 +2034,12 @@ menu_system() {
         header "Система и Сеть"
         printf "${BLUE}─── Базовые настройки ───────────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} 📦  Обновление системы (APT upgrade)\n"
-        printf "${BOLD}  2)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
-        printf "${BOLD}  3)${NC} 💾  Настройка SWAP\n"
+        printf "${BOLD}  2)${NC} 💾  Настройка SWAP\n"
         echo ""
         printf "${BLUE}─── Сетевые настройки ───────────────────────────────${NC}\n"
-        printf "${BOLD}  4)${NC} 🌐  Управление IPv6\n"
-        printf "${BOLD}  5)${NC} 🚀  Продвинутый тюнинг сети (VPN)\n"
+        printf "${BOLD}  3)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
+        printf "${BOLD}  4)${NC} 🚀  Продвинутый тюнинг сети (VPN)\n"
+        printf "${BOLD}  5)${NC} 🌐  Управление IPv6\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -2047,10 +2047,10 @@ menu_system() {
 
         case "$choice" in
             1) do_update ;;
-            2) do_install_bbr ;;
-            3) do_setup_swap ;;
-            4) menu_ipv6 ;;
-            5) do_network_tuning ;;
+            2) do_setup_swap ;;
+            3) do_install_bbr ;;
+            4) do_network_tuning ;;
+            5) menu_ipv6 ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
