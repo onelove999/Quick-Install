@@ -55,6 +55,14 @@ require_root() {
 # ═══════════════════════════════════════════════════════════════
 do_update() {
     header "Обновление системы"
+    
+    read -rp "$(printf "${YELLOW}Вы уверены, что хотите обновить систему (apt upgrade)? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Обновление отменено."
+        press_enter
+        return
+    fi
+
     info "Обновление списка пакетов..."
     apt update
     info "Обновление установленных пакетов..."
@@ -68,6 +76,15 @@ do_update() {
 # ═══════════════════════════════════════════════════════════════
 ufw_enable_secure() {
     header "Включение UFW (Безопасное)"
+    
+    warn "Это действие включит фаервол и разрешит доступ по SSH."
+    read -rp "$(printf "${YELLOW}Продолжить? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
     info "Разрешаем OpenSSH..."
     ufw allow OpenSSH
     info "Добавляем защиту SSH от брутфорса (rate limit)..."
@@ -104,6 +121,12 @@ ufw_enable_basic() {
 
 ufw_disable() {
     header "Выключение UFW"
+    read -rp "$(printf "${YELLOW}Вы уверены, что хотите полностью выключить фаервол? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
     ufw disable
     success "UFW выключен."
     press_enter
@@ -191,6 +214,14 @@ set_icmp_rules() {
 
 ufw_disable_ping() {
     header "Отключение пингования (ICMP DROP)"
+    
+    read -rp "$(printf "${YELLOW}Отключить ответы на пинг (ICMP DROP)? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
     local rules_file="/etc/ufw/before.rules"
 
     if [ ! -f "$rules_file" ]; then
@@ -214,6 +245,14 @@ ufw_disable_ping() {
 
 ufw_enable_ping() {
     header "Включение пингования (ICMP ACCEPT)"
+
+    read -rp "$(printf "${YELLOW}Включить ответы на пинг (ICMP ACCEPT)? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
     local rules_file="/etc/ufw/before.rules"
 
     if [ ! -f "$rules_file" ]; then
@@ -480,6 +519,14 @@ do_download_geo() {
     fi
     success "Файл $filename успешно скачан."
 
+    # Сохраняем ссылку в urls.txt
+    local urls_file="${geo_dir}/urls.txt"
+    touch "$urls_file"
+    grep -v "^${filename}|" "$urls_file" > "${urls_file}.tmp" 2>/dev/null || true
+    echo "${filename}|${geo_url}" >> "${urls_file}.tmp"
+    mv "${urls_file}.tmp" "$urls_file"
+    info "Ссылка на файл сохранена для последующих обновлений."
+
     # 3. Прописать в docker-compose.yml
     if [ -f "$COMPOSE_FILE" ]; then
         if grep -q "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
@@ -531,6 +578,95 @@ do_download_geo() {
     press_enter
 }
 
+do_update_all_geo() {
+    header "Обновление всех Geo файлов"
+    local geo_dir="${REMNA_DIR}/geo"
+    local urls_file="${geo_dir}/urls.txt"
+
+    if [ ! -f "$urls_file" ] || [ ! -s "$urls_file" ]; then
+        error "Список ссылок пуст! Сначала добавьте файлы через меню (пункт 9)."
+        press_enter
+        return
+    fi
+
+    local total
+    total=$(wc -l < "$urls_file")
+    info "Найдено файлов для обновления: $total"
+    
+    local count=0
+    while IFS='|' read -r filename url || [ -n "$filename" ]; do
+        [ -z "$filename" ] || [ -z "$url" ] && continue
+        info "[$((count+1))/$total] Скачивание $filename..."
+        if wget -qO "${geo_dir}/${filename}" "$url"; then
+            success "$filename обновлен."
+            count=$((count + 1))
+        else
+            error "Не удалось скачать $filename"
+        fi
+    done < "$urls_file"
+
+    if [ "$count" -gt 0 ]; then
+        success "Обновлено файлов: $count"
+        read -rp "$(printf "${YELLOW}Перезапустить контейнер для применения изменений? [y/N]: ${NC}")" restart_confirm
+        if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
+            info "Перезапуск контейнера..."
+            cd "$REMNA_DIR" && docker compose restart
+            success "Контейнер перезапущен."
+        fi
+    fi
+    press_enter
+}
+
+manage_geo_autoupdate() {
+    header "Настройка автообновления Geo"
+    local cron_script="${REMNA_DIR}/scripts/update_geo.sh"
+    local cron_job="0 3 * * 1 bash $cron_script > /dev/null 2>&1" # По умолчанию: Пн, 3:00
+
+    # 1. Проверка статуса
+    local is_enabled=false
+    if crontab -l 2>/dev/null | grep -q "$cron_script"; then
+        is_enabled=true
+    fi
+
+    if [ "$is_enabled" = true ]; then
+        success "Автообновление СЕЙЧАС ВКЛЮЧЕНО (раз в неделю)."
+        read -rp "$(printf "${YELLOW}Вы хотите ОТКЛЮЧИТЬ его? [y/N]: ${NC}")" disable_confirm
+        if [[ "$disable_confirm" =~ ^[Yy]$ ]]; then
+            crontab -l 2>/dev/null | grep -v "$cron_script" | crontab -
+            success "Автообновление отключено."
+        fi
+    else
+        warn "Автообновление СЕЙЧАС ВЫКЛЮЧЕНО."
+        read -rp "$(printf "${CYAN}Вы хотите ВКЛЮЧИТЬ автообновление (раз в неделю)? [y/N]: ${NC}")" enable_confirm
+        if [[ "$enable_confirm" =~ ^[Yy]$ ]]; then
+            # Создаем папку и скрипт
+            mkdir -p "${REMNA_DIR}/scripts"
+            cat > "$cron_script" <<EOF
+#!/bin/bash
+# Скрипт автообновления Geo файлов — создано setup.sh
+GEO_DIR="${REMNA_DIR}/geo"
+URLS_FILE="\${GEO_DIR}/urls.txt"
+COMPOSE_DIR="${REMNA_DIR}"
+
+if [ -f "\$URLS_FILE" ]; then
+    while IFS='|' read -r filename url || [ -n "\$filename" ]; do
+        [ -z "\$filename" ] || [ -z "\$url" ] && continue
+        wget -qO "\${GEO_DIR}/\${filename}" "\$url"
+    done < "\$URLS_FILE"
+    
+    cd "\$COMPOSE_DIR" && docker compose restart
+fi
+EOF
+            chmod +x "$cron_script"
+            
+            # Добавляем в cron
+            (crontab -l 2>/dev/null; echo "$cron_job") | crontab -
+            success "Автообновление включено (Расписание: каждый понедельник в 03:00)."
+        fi
+    fi
+    press_enter
+}
+
 do_show_access_logs() {
     header "Логи подключений (access.log)"
     local log_file="/var/log/remnanode/access.log"
@@ -543,6 +679,28 @@ do_show_access_logs() {
     echo ""
     tail -f "$log_file"
     press_enter
+}
+
+menu_geo() {
+    while true; do
+        clear
+        header "Управление Geo файлами"
+        printf "${BOLD}  1)${NC} 📥  Загрузить новый Geo файл\n"
+        printf "${BOLD}  2)${NC} 🔄  Обновить все сохраненные файлы (ручной)\n"
+        printf "${BOLD}  3)${NC} ⏰  Настройка автообновления (cron)\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_download_geo ;;
+            2) do_update_all_geo ;;
+            3) manage_geo_autoupdate ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
 }
 
 menu_node() {
@@ -561,7 +719,7 @@ menu_node() {
         printf "${BOLD}  6)${NC} 🛠️  Установка ноды (Docker + Compose)\n"
         printf "${BOLD}  7)${NC} 🔄  Обновить ноду (Docker Pull)\n"
         printf "${BOLD}  8)${NC} 📝  Редактировать docker-compose.yml\n"
-        printf "${BOLD}  9)${NC} 🌍  Загрузить/Обновить Geo файлы\n"
+        printf "${BOLD}  9)${NC} 🌍  Управление Geo файлами\n"
         echo ""
         printf "${BLUE}─── Автоматизация ───────────────────────────────────${NC}\n"
         printf "${BOLD} 10)${NC} 📋  Настройка логов (Logrotate)\n"
@@ -580,7 +738,7 @@ menu_node() {
             6) do_install_node ;;
             7) do_update_node ;;
             8) do_edit_node_compose ;;
-            9) do_download_geo ;;
+            9) menu_geo ;;
             10) do_install_logs ;;
             11) do_install_watchdog ;;
             0) return ;;
@@ -694,6 +852,25 @@ menu_tests() {
 # ═══════════════════════════════════════════════════════════════
 do_install_bbr() {
     header "Установка TCP BBR"
+
+    # ─── Проверка текущего состояния ───
+    local cur
+    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    if [ "$cur" = "bbr" ]; then
+        success "TCP BBR уже включён и активен."
+        read -rp "$(printf "${YELLOW}Хотите переустановить настройки? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            press_enter
+            return
+        fi
+    else
+        read -rp "$(printf "${YELLOW}Включить TCP BBR? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Отменено."
+            press_enter
+            return
+        fi
+    fi
 
     # ─── Проверка ядра ───
     local full major minor ver
@@ -858,6 +1035,14 @@ do_check_ipv6_status() {
 
 do_disable_ipv6() {
     header "Отключение IPv6"
+
+    read -rp "$(printf "${YELLOW}Вы уверены, что хотите полностью отключить IPv6 в системе? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
     local conf_file="/etc/sysctl.d/99-disable-ipv6.conf"
     
     info "Создание $conf_file..."
@@ -878,6 +1063,14 @@ EOF
 
 do_enable_ipv6() {
     header "Включение IPv6"
+
+    read -rp "$(printf "${YELLOW}Включить IPv6? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
     local conf_file="/etc/sysctl.d/99-disable-ipv6.conf"
     
     if [ -f "$conf_file" ]; then
@@ -985,6 +1178,24 @@ EOF
 do_install_logs() {
     header "Установка системы логов"
 
+    # 0. Проверка существующей установки
+    if [ -f "/etc/logrotate.d/remnanode" ] || [ -d "$LOG_DIR" ]; then
+        warn "Система логов 'remnanode' уже настроена."
+        read -rp "$(printf "${YELLOW}Вы уверены, что хотите переустановить систему логов? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Установка отменена."
+            press_enter
+            return
+        fi
+    else
+        read -rp "$(printf "${YELLOW}Установить систему логов (logrotate + папки)? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Установка отменена."
+            press_enter
+            return
+        fi
+    fi
+
     # 1. Logrotate
     if ! command -v logrotate &>/dev/null; then
         info "Установка logrotate..."
@@ -1059,6 +1270,24 @@ EOF
 # ═══════════════════════════════════════════════════════════════
 do_install_watchdog() {
     header "Установка Watchdog (Xray Scan Detector)"
+
+    # 0. Проверка существующей установки
+    if [ -f "/etc/systemd/system/xray-watchdog.service" ] || [ -f "${REMNA_DIR}/scan_detector.py" ]; then
+        warn "Watchdog уже установлен."
+        read -rp "$(printf "${YELLOW}Вы уверены, что хотите переустановить Watchdog? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Установка отменена."
+            press_enter
+            return
+        fi
+    else
+        read -rp "$(printf "${YELLOW}Установить Watchdog (детектор сканирований)? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Установка отменена."
+            press_enter
+            return
+        fi
+    fi
 
     # 1. Запрос параметров
     read -rp "$(printf "${CYAN}Введите имя ноды (NODE_NAME), напр. 🇳🇱 NL02_node: ${NC}")" node_name
@@ -1465,6 +1694,14 @@ do_install_beszel() {
 
 do_uninstall_warp() {
     header "Удаление Cloudflare WARP"
+    
+    read -rp "$(printf "${YELLOW}Вы уверены, что хотите ПОЛНОСТЬЮ удалить Cloudflare WARP? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Отменено."
+        press_enter
+        return
+    fi
+
     info "Остановка интерфейса warp..."
     if ip link show warp &>/dev/null; then
         wg-quick down warp &>/dev/null || true
@@ -1603,6 +1840,24 @@ menu_warp() {
 
 do_install_adguard() {
     header "Установка AdGuard Home"
+
+    # 0. Проверка существующей установки
+    if [ -d "$AGH_DIR" ] || (command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^adguardhome$"); then
+        warn "AdGuard Home уже установлен или обнаружена папка установки."
+        read -rp "$(printf "${YELLOW}Вы уверены, что хотите переустановить AdGuard Home? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Установка отменена."
+            press_enter
+            return
+        fi
+    else
+        read -rp "$(printf "${YELLOW}Установить AdGuard Home? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Установка отменена."
+            press_enter
+            return
+        fi
+    fi
 
     # 1. Подготовка папок
     info "Создание директорий: ${AGH_DIR}/workdir, ${AGH_DIR}/confdir..."
