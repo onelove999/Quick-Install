@@ -721,10 +721,6 @@ menu_node() {
         printf "${BOLD}  8)${NC} 📝  Редактировать docker-compose.yml\n"
         printf "${BOLD}  9)${NC} 🌍  Управление Geo файлами\n"
         echo ""
-        printf "${BLUE}─── Автоматизация ───────────────────────────────────${NC}\n"
-        printf "${BOLD} 10)${NC} 📋  Настройка логов (Logrotate)\n"
-        printf "${BOLD} 11)${NC} 🐕  Установка Watchdog\n"
-        echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
@@ -739,8 +735,6 @@ menu_node() {
             7) do_update_node ;;
             8) do_edit_node_compose ;;
             9) menu_geo ;;
-            10) do_install_logs ;;
-            11) do_install_watchdog ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
