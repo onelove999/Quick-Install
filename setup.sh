@@ -848,16 +848,37 @@ do_install_bbr() {
     header "Установка TCP BBR"
 
     # ─── Проверка текущего состояния ───
+    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
     local cur
     cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-    if [ "$cur" = "bbr" ]; then
-        success "TCP BBR уже включён и активен."
-        read -rp "$(printf "${YELLOW}Хотите переустановить настройки? [y/N]: ${NC}")" confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            press_enter
-            return
-        fi
+
+    if [ -f "$sysctl_file" ]; then
+        success "Конфигурация BBR найдена ($cur)."
+        echo ""
+        printf "${BOLD}  1)${NC} Переустановить / Обновить настройки BBR\n"
+        printf "${BOLD}  2)${NC} ${RED}Отключить и удалить BBR${NC} (вернуться к дефолту)\n"
+        printf "${BOLD}  0)${NC} Отмена\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" bbr_choice
+
+        case "$bbr_choice" in
+            1) info "Переустановка..." ;;
+            2)
+                rm -f "$sysctl_file"
+                info "Сбрасываю параметры на стандартные (cubic/fq_codel)..."
+                sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+                sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1
+                sysctl --system >/dev/null 2>&1
+                success "BBR отключен, файл конфигурации удален."
+                press_enter
+                return
+                ;;
+            *) info "Отменено."; press_enter; return ;;
+        esac
     else
+        if [ "$cur" = "bbr" ]; then
+            warn "BBR активен, но файл $sysctl_file не найден (возможно, включено вручную)."
+        fi
         read -rp "$(printf "${YELLOW}Включить TCP BBR? [y/N]: ${NC}")" confirm
         if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
             info "Отменено."
@@ -1127,8 +1148,7 @@ do_network_tuning() {
         warn "Тюнинг в данный момент НЕ АКТИВИРОВАН."
         echo ""
         info "Будут применены следующие параметры:"
-        echo "  - net.core.default_qdisc=fq"
-        echo "  - net.ipv4.tcp_congestion_control=bbr"
+        info "${YELLOW}(Рекомендуется предварительно включить BBR в основном меню)${NC}"
         echo "  - Увеличение буферов TCP (rmem/wmem) до 64МБ"
         echo "  - Оптимизация очередей (backlog, somaxconn)"
         echo "  - Включение TCP FastOpen и MTU Probing"
@@ -1137,8 +1157,6 @@ do_network_tuning() {
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             info "Запись параметров в $conf_file..."
             cat > "$conf_file" <<EOF
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
 net.ipv4.conf.all.rp_filter=0
 net.ipv4.conf.default.rp_filter=0
 net.core.rmem_max=67108864
