@@ -1737,7 +1737,7 @@ scoring:
     whitelist: 0
     spam: 50
     local_net: 10
-    ssh: 50
+    ssh: 25
     suspicious_port: 30
   spam_ports: ["25", "465", "587"]
   suspicious_ports: ["22", "23", "445", "3389", "1433", "3306"]

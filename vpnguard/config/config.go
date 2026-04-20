@@ -100,7 +100,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Scoring.Points.LocalNet = 10
 	}
 	if cfg.Scoring.Points.SSH == 0 {
-		cfg.Scoring.Points.SSH = 50
+		cfg.Scoring.Points.SSH = 25
 	}
 	if cfg.Scoring.Points.SuspiciousPort == 0 {
 		cfg.Scoring.Points.SuspiciousPort = 30
