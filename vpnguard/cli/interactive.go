@@ -86,8 +86,8 @@ func RunInteractive(cfg *config.Config, tg *alerter.Telegram) error {
 		for item := range set {
 			results = append(results, item)
 		}
-		sort.Strings(results)
 	}
+	sort.Strings(results)
 
 	fmt.Printf("\nFound %d records.\n", len(results))
 
