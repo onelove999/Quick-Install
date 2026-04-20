@@ -9,11 +9,12 @@ import (
 	"sort"
 	"strings"
 
+	"vpnguard/alerter"
 	"vpnguard/config"
 	"vpnguard/daemon"
 )
 
-func RunInteractive(cfg *config.Config) error {
+func RunInteractive(cfg *config.Config, tg *alerter.Telegram) error {
 	files, err := collectLogFiles(cfg.LogFile)
 	if err != nil {
 		return err
@@ -86,15 +87,46 @@ func RunInteractive(cfg *config.Config) error {
 	}
 
 	fmt.Printf("\nFound %d records.\n", len(results))
-	for _, item := range results {
-		fmt.Println(item)
-	}
 
 	outPath := prompt(reader, "\nOutput file [result.txt]: ")
 	if strings.TrimSpace(outPath) == "" {
 		outPath = "result.txt"
 	}
-	return os.WriteFile(outPath, []byte(strings.Join(results, "\n")+"\n"), 0o644)
+	output := []byte(strings.Join(results, "\n") + "\n")
+	if err := os.WriteFile(outPath, output, 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("Results saved to %s\n", outPath)
+
+	sendTg := ""
+	for {
+		sendTg = strings.ToLower(prompt(reader, "Send results to Telegram? [y/n]: "))
+		if sendTg == "y" || sendTg == "n" {
+			break
+		}
+		fmt.Println("Please enter 'y' or 'n'.")
+	}
+
+	if sendTg == "y" {
+		fmt.Println("Sending to Telegram...")
+		summary := fmt.Sprintf("🔍 <b>Interactive Search</b>\n\nFound: %d records\nFilter: %s (%s)\nExtracted: %s",
+			len(results), getFilterName(filterKind), filterValue, getExtractName(extractKind))
+		if err := tg.SendReport(cfg.NodeName, summary, output); err != nil {
+			return fmt.Errorf("send telegram: %w", err)
+		}
+		fmt.Println("Sent successfully.")
+	}
+	return nil
+}
+
+func getFilterName(kind string) string {
+	names := map[string]string{"1": "none", "2": "email", "3": "IP", "4": "host", "5": "text"}
+	return names[kind]
+}
+
+func getExtractName(kind string) string {
+	names := map[string]string{"1": "full line", "2": "destination", "3": "IP", "4": "email"}
+	return names[kind]
 }
 
 func collectLogFiles(primary string) ([]string, error) {

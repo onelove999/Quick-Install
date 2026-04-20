@@ -33,7 +33,7 @@ func main() {
 
 	switch {
 	case interactive:
-		if err := cli.RunInteractive(cfg); err != nil {
+		if err := cli.RunInteractive(cfg, tg); err != nil {
 			fmt.Fprintf(os.Stderr, "interactive mode failed: %v\n", err)
 			os.Exit(1)
 		}
