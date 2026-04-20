@@ -3,6 +3,7 @@ package daemon
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -134,27 +135,34 @@ func (m *Monitor) readNewLines(file *os.File, offset *int64) error {
 		return err
 	}
 
-	scanner := bufio.NewScanner(file)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 1024*1024)
+	reader := bufio.NewReader(file)
 
-	for scanner.Scan() {
-		line := scanner.Text()
-		*offset += int64(len(scanner.Bytes()) + 1)
-		entry, err := ParseLine(line)
-		if err != nil || entry.SourceIP == "" || entry.SourceIP == "127.0.0.1" || entry.SourceIP == "::1" {
-			continue
+	for {
+		lineBytes, err := reader.ReadBytes('\n')
+		if len(lineBytes) > 0 && lineBytes[len(lineBytes)-1] == '\n' {
+			*offset += int64(len(lineBytes))
+			line := strings.TrimRight(string(lineBytes), "\r\n")
+			
+			entry, parseErr := ParseLine(line)
+			if parseErr == nil && entry.SourceIP != "" && entry.SourceIP != "127.0.0.1" && entry.SourceIP != "::1" {
+				if alert := m.scorer.Add(entry); alert != nil {
+					if recErr := m.recordAlert(alert); recErr != nil {
+						m.logger.Printf("alert log error: %v", recErr)
+					}
+					if tgErr := m.alerts.SendAlert(m.cfg.NodeName, alert); tgErr != nil {
+						m.logger.Printf("telegram alert failed: %v", tgErr)
+					}
+				}
+			}
 		}
-		if alert := m.scorer.Add(entry); alert != nil {
-			if err := m.recordAlert(alert); err != nil {
-				m.logger.Printf("alert log error: %v", err)
+
+		if err != nil {
+			if err != io.EOF {
+				return err
 			}
-			if err := m.alerts.SendAlert(m.cfg.NodeName, alert); err != nil {
-				m.logger.Printf("telegram alert failed: %v", err)
-			}
+			return nil
 		}
 	}
-	return scanner.Err()
 }
 
 func (m *Monitor) recordAlert(alert *Alert) error {
