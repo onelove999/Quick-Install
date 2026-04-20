@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 # ============================================================
 # setup.sh — Универсальный скрипт настройки сервера
 # Запуск: sudo bash setup.sh
@@ -25,6 +25,8 @@ VPNGUARD_DIR="/opt/vpnguard"
 VPNGUARD_CONFIG="${VPNGUARD_DIR}/vpnguard.yaml"
 VPNGUARD_COMPOSE_FILE="${VPNGUARD_DIR}/docker-compose.yml"
 VPNGUARD_ENV_FILE="${VPNGUARD_DIR}/source.env"
+VPNGUARD_GITHUB_REPO="onelove999/Quick-Install"
+VPNGUARD_GITHUB_REF="main"
 
 
 # Watchdog — данные запрашиваются при установке
@@ -1655,30 +1657,13 @@ compose_vpnguard() {
 
 ensure_vpnguard_source_settings() {
     mkdir -p "$VPNGUARD_DIR"
-    local current_repo=""
-    local current_ref=""
-
-    if [ -f "$VPNGUARD_ENV_FILE" ]; then
-        # shellcheck disable=SC1090
-        source "$VPNGUARD_ENV_FILE"
-        current_repo="${GITHUB_REPO:-}"
-        current_ref="${GITHUB_REF:-main}"
-    fi
-
-    read -rp "$(printf "${CYAN}GitHub репозиторий для VPN Guard (owner/repo) [${current_repo:-owner/repo}]: ${NC}")" github_repo
-    github_repo="${github_repo:-${current_repo:-owner/repo}}"
-    if [ -z "$github_repo" ]; then
-        error "Репозиторий не может быть пустым."
-        return 1
-    fi
-
-    read -rp "$(printf "${CYAN}Ветка или тег [${current_ref:-main}]: ${NC}")" github_ref
-    github_ref="${github_ref:-${current_ref:-main}}"
 
     cat > "$VPNGUARD_ENV_FILE" <<EOF
-GITHUB_REPO="${github_repo}"
-GITHUB_REF="${github_ref}"
+GITHUB_REPO="${VPNGUARD_GITHUB_REPO}"
+GITHUB_REF="${VPNGUARD_GITHUB_REF}"
 EOF
+
+    info "Источник VPN Guard: ${VPNGUARD_GITHUB_REPO}@${VPNGUARD_GITHUB_REF}"
 }
 
 download_vpnguard_source() {
@@ -2611,15 +2596,15 @@ menu_security() {
 menu_monitoring() {
     while true; do
         clear
-        header "���������� � ����"
-        printf "${BOLD}  1)${NC} Beszel Agent (������ �����������)\n"
-        printf "${BOLD}  2)${NC} VPN Guard (Docker + ���������)\n"
+        header "���������� � ����"
+        printf "${BOLD}  1)${NC} Beszel Agent (������ �����������)\n"
+        printf "${BOLD}  2)${NC} VPN Guard (Docker + ���������)\n"
         printf "${BOLD}  3)${NC} Legacy Watchdog\n"
-        printf "${BOLD}  4)${NC} ��������� ������� ����� (Logrotate)\n"
+        printf "${BOLD}  4)${NC} ��������� ������� ����� (Logrotate)\n"
         echo ""
-        printf "${BOLD}  0)${NC} < �����\n"
+        printf "${BOLD}  0)${NC} < �����\n"
         echo ""
-        read -rp "$(printf "${CYAN}�������� ��������: ${NC}")" choice
+        read -rp "$(printf "${CYAN}�������� ��������: ${NC}")" choice
 
         case "$choice" in
             1) do_install_beszel ;;
@@ -2627,7 +2612,7 @@ menu_monitoring() {
             3) menu_watchdog_legacy ;;
             4) do_install_logs ;;
             0) return ;;
-            *) warn "�������� �����." ; sleep 1 ;;
+            *) warn "�������� �����." ; sleep 1 ;;
         esac
     done
 }
@@ -2698,4 +2683,6 @@ main_menu() {
 # ─── Точка входа ─────────────────────────────────────────────
 require_root
 main_menu
+
+
 
