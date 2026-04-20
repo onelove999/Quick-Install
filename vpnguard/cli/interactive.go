@@ -63,9 +63,12 @@ func RunInteractive(cfg *config.Config, tg *alerter.Telegram) error {
 			if !matchesFilter(line, filterKind, filterValue) {
 				return nil
 			}
-			item := extractValue(line, extractKind)
-			if item != "" {
-				results = append(results, item)
+			val, ts := extractValue(line, extractKind)
+			if val != "" {
+				if !dedup && extractKind != "1" && ts != "" {
+					val = ts + " " + val
+				}
+				results = append(results, val)
 			}
 			return nil
 		})
@@ -185,21 +188,25 @@ func matchesFilter(line, kind, value string) bool {
 	}
 }
 
-func extractValue(line, kind string) string {
+func extractValue(line, kind string) (string, string) {
 	entry, err := daemon.ParseLine(line)
 	if err != nil && kind != "1" {
-		return ""
+		return "", ""
+	}
+	ts := ""
+	if entry != nil {
+		ts = entry.RawTime
 	}
 	switch kind {
 	case "2":
 		host, _ := daemon.SplitDestination(entry.Destination)
-		return host
+		return host, ts
 	case "3":
-		return entry.SourceIP
+		return entry.SourceIP, ts
 	case "4":
-		return entry.Email
+		return entry.Email, ts
 	default:
-		return strings.TrimSpace(line)
+		return strings.TrimSpace(line), ts
 	}
 }
 
