@@ -2581,15 +2581,15 @@ menu_security() {
 menu_monitoring() {
     while true; do
         clear
-        header "���������� � ����"
-        printf "${BOLD}  1)${NC} Beszel Agent (������ �����������)\n"
-        printf "${BOLD}  2)${NC} VPN Guard (Docker + ���������)\n"
+        header "Мониторинг и Логи"
+        printf "${BOLD}  1)${NC} Beszel Agent (Панель мониторинга)\n"
+        printf "${BOLD}  2)${NC} VPN Guard (Docker + Аналитика)\n"
         printf "${BOLD}  3)${NC} Legacy Watchdog\n"
-        printf "${BOLD}  4)${NC} ��������� ������� ����� (Logrotate)\n"
+        printf "${BOLD}  4)${NC} Настройка ротации логов (Logrotate)\n"
         echo ""
-        printf "${BOLD}  0)${NC} < �����\n"
+        printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
-        read -rp "$(printf "${CYAN}�������� ��������: ${NC}")" choice
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
 
         case "$choice" in
             1) do_install_beszel ;;
@@ -2597,7 +2597,7 @@ menu_monitoring() {
             3) menu_watchdog_legacy ;;
             4) do_install_logs ;;
             0) return ;;
-            *) warn "�������� �����." ; sleep 1 ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
         esac
     done
 }
