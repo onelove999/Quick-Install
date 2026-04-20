@@ -112,8 +112,16 @@ func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
 	}
 	fmt.Printf("Report saved to %s\n", outPath)
 
-	sendTg := prompt(reader, "Send report to Telegram? [y/N]: ")
-	if strings.ToLower(sendTg) == "y" {
+	var sendTg string
+	for {
+		sendTg = strings.ToLower(prompt(reader, "Send report to Telegram? [y/n]: "))
+		if sendTg == "y" || sendTg == "n" {
+			break
+		}
+		fmt.Println("Please enter 'y' (Yes) or 'n' (No).")
+	}
+
+	if sendTg == "y" {
 		fmt.Println("Sending to Telegram...")
 		summary := extractSummary(reportLines)
 		if err := tg.SendReport(cfg.NodeName, summary, []byte(output)); err != nil {
