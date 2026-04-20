@@ -21,6 +21,10 @@ REMNA_DIR="/opt/remnanode"
 LOG_DIR="/var/log/remnanode"
 COMPOSE_FILE="${REMNA_DIR}/docker-compose.yml"
 AGH_DIR="/opt/adguardhome"
+VPNGUARD_DIR="/opt/vpnguard"
+VPNGUARD_CONFIG="${VPNGUARD_DIR}/vpnguard.yaml"
+VPNGUARD_COMPOSE_FILE="${VPNGUARD_DIR}/docker-compose.yml"
+VPNGUARD_ENV_FILE="${VPNGUARD_DIR}/source.env"
 
 
 # Watchdog — данные запрашиваются при установке
@@ -1634,6 +1638,533 @@ EOF
 # ═══════════════════════════════════════════════════════════════
 # 8. УСТАНОВКА BESZEL AGENT
 # ═══════════════════════════════════════════════════════════════
+compose_vpnguard() {
+    if command -v docker &>/dev/null && docker compose version &>/dev/null; then
+        (cd "$VPNGUARD_DIR" && docker compose "$@")
+        return $?
+    fi
+
+    if command -v docker-compose &>/dev/null; then
+        (cd "$VPNGUARD_DIR" && docker-compose "$@")
+        return $?
+    fi
+
+    error "Docker Compose не найден."
+    return 1
+}
+
+ensure_vpnguard_source_settings() {
+    mkdir -p "$VPNGUARD_DIR"
+    local current_repo=""
+    local current_ref=""
+
+    if [ -f "$VPNGUARD_ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        source "$VPNGUARD_ENV_FILE"
+        current_repo="${GITHUB_REPO:-}"
+        current_ref="${GITHUB_REF:-main}"
+    fi
+
+    read -rp "$(printf "${CYAN}GitHub репозиторий для VPN Guard (owner/repo) [${current_repo:-owner/repo}]: ${NC}")" github_repo
+    github_repo="${github_repo:-${current_repo:-owner/repo}}"
+    if [ -z "$github_repo" ]; then
+        error "Репозиторий не может быть пустым."
+        return 1
+    fi
+
+    read -rp "$(printf "${CYAN}Ветка или тег [${current_ref:-main}]: ${NC}")" github_ref
+    github_ref="${github_ref:-${current_ref:-main}}"
+
+    cat > "$VPNGUARD_ENV_FILE" <<EOF
+GITHUB_REPO="${github_repo}"
+GITHUB_REF="${github_ref}"
+EOF
+}
+
+download_vpnguard_source() {
+    if [ ! -f "$VPNGUARD_ENV_FILE" ]; then
+        error "Сначала задайте GitHub-источник."
+        return 1
+    fi
+
+    # shellcheck disable=SC1090
+    source "$VPNGUARD_ENV_FILE"
+
+    local repo="${GITHUB_REPO:-}"
+    local ref="${GITHUB_REF:-main}"
+    local archive_url="https://github.com/${repo}/archive/${ref}.tar.gz"
+    local tmp_dir archive_file root_dir
+
+    if [ -z "$repo" ]; then
+        error "GitHub репозиторий не задан."
+        return 1
+    fi
+
+    tmp_dir="$(mktemp -d)"
+    archive_file="${tmp_dir}/vpnguard.tar.gz"
+
+    info "Скачиваю исходники VPN Guard из ${repo}@${ref}..."
+    if ! curl -fsSL "$archive_url" -o "$archive_file"; then
+        rm -rf "$tmp_dir"
+        error "Не удалось скачать архив ${archive_url}"
+        return 1
+    fi
+
+    if ! tar -xzf "$archive_file" -C "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        error "Не удалось распаковать архив."
+        return 1
+    fi
+
+    root_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    if [ ! -d "${root_dir}/vpnguard" ]; then
+        rm -rf "$tmp_dir"
+        error "В архиве не найден каталог vpnguard/."
+        return 1
+    fi
+
+    mkdir -p "${VPNGUARD_DIR}/src"
+    rm -rf "${VPNGUARD_DIR}/src/vpnguard"
+    cp -a "${root_dir}/vpnguard" "${VPNGUARD_DIR}/src/vpnguard"
+    rm -rf "$tmp_dir"
+
+    success "Исходники VPN Guard обновлены."
+}
+
+generate_vpnguard_config() {
+    mkdir -p "$VPNGUARD_DIR" "${VPNGUARD_DIR}/reports"
+    touch "${VPNGUARD_DIR}/guard_alerts.log"
+
+    local default_node_name
+    default_node_name="$(hostname)"
+
+    if [ -f "$VPNGUARD_CONFIG" ]; then
+        info "Конфиг VPN Guard уже существует: $VPNGUARD_CONFIG"
+        return 0
+    fi
+
+    read -rp "$(printf "${CYAN}Имя ноды [${default_node_name}]: ${NC}")" node_name
+    node_name="${node_name:-$default_node_name}"
+    read -rp "$(printf "${CYAN}Telegram Bot Token (можно оставить пустым): ${NC}")" tg_bot_token
+    read -rp "$(printf "${CYAN}Telegram Chat ID (можно оставить пустым): ${NC}")" tg_chat_id
+
+    cat > "$VPNGUARD_CONFIG" <<EOF
+node_name: "${node_name}"
+log_file: "/var/log/remnanode/access.log"
+alert_log: "/app/guard_alerts.log"
+
+telegram:
+  bot_token: "${tg_bot_token}"
+  chat_id: "${tg_chat_id}"
+
+scoring:
+  threshold: 800
+  window_seconds: 60
+  alert_cooldown: 120
+  points:
+    domain: 1
+    ip: 3
+    whitelist: 0
+    spam: 100
+    local_net: 10
+    ssh: 50
+    suspicious_port: 30
+  spam_ports: ["25", "465", "587"]
+  suspicious_ports: ["22", "23", "445", "3389", "1433", "3306"]
+  local_nets: ["192.168.", "10.", "172.16.", "127.0.0.1", "localhost"]
+
+whitelist:
+  domains:
+    - google
+    - youtube
+    - googlevideo
+    - gmail
+    - gstatic
+    - doubleclick
+    - android
+    - facebook
+    - fbcdn
+    - instagram
+    - whatsapp
+    - meta
+    - cdninstagram
+    - apple
+    - icloud
+    - itunes
+    - iphone
+    - push.apple.com
+    - tiktok
+    - tiktokcdn
+    - tiktokv
+    - netflix
+    - nflxvideo
+    - microsoft
+    - windowsupdate
+    - azure
+    - office
+    - amazon
+    - aws
+    - telegram
+    - spotify
+    - cloudflare
+    - yandex
+    - ya.ru
+    - kinopoisk
+    - vk.com
+    - ok.ru
+    - vkuser
+    - userapi
+    - mail.ru
+    - steam
+    - valve
+    - epicgames
+    - discord
+    - avito
+    - ozon
+    - wildberries
+    - wb.ru
+    - openai
+    - chatgpt
+    - anthropic
+    - claude
+    - gemini
+    - deepseek
+    - github
+    - githubusercontent
+    - copilot
+  trusted_ip_prefixes:
+    - "149.154."
+    - "91.108."
+    - "5.28."
+    - "91.105."
+    - "95.161."
+    - "2001:67c:"
+    - "2001:b28:"
+    - "173.194."
+    - "74.125."
+    - "142.250."
+    - "142.251."
+    - "162.159."
+    - "199.103."
+    - "35.214."
+    - "104.16."
+    - "104.17."
+    - "104.18."
+    - "104.19."
+    - "104.20."
+    - "104.21."
+    - "172.64."
+    - "172.67."
+    - "199.232."
+    - "92.223."
+    - "185.106."
+    - "87.240."
+    - "95.163."
+    - "93.186."
+EOF
+
+    success "Создан конфиг $VPNGUARD_CONFIG"
+}
+
+generate_vpnguard_compose() {
+    mkdir -p "$VPNGUARD_DIR" "${VPNGUARD_DIR}/reports"
+    cat > "$VPNGUARD_COMPOSE_FILE" <<EOF
+services:
+  vpnguard:
+    build:
+      context: ${VPNGUARD_DIR}/src/vpnguard
+    container_name: vpnguard
+    restart: unless-stopped
+    volumes:
+      - ${LOG_DIR}:${LOG_DIR}:ro
+      - ${VPNGUARD_CONFIG}:/app/vpnguard.yaml
+      - ${VPNGUARD_DIR}/guard_alerts.log:/app/guard_alerts.log
+      - ${VPNGUARD_DIR}/reports:/reports
+EOF
+    success "Создан $VPNGUARD_COMPOSE_FILE"
+}
+
+offer_disable_legacy_watchdog() {
+    if [ -f "/etc/systemd/system/xray-watchdog.service" ]; then
+        warn "Обнаружен legacy watchdog (xray-watchdog.service)."
+        read -rp "$(printf "${YELLOW}Остановить и отключить старый watchdog сейчас? [y/N]: ${NC}")" confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            systemctl stop xray-watchdog 2>/dev/null || true
+            systemctl disable xray-watchdog 2>/dev/null || true
+            success "Legacy watchdog остановлен и отключен."
+        fi
+    fi
+}
+
+do_install_vpnguard() {
+    header "Установка / Обновление VPN Guard"
+
+    if ! command -v curl &>/dev/null; then
+        info "Устанавливаю curl..."
+        apt-get update -qq
+        apt-get install -y curl tar > /dev/null 2>&1
+    fi
+
+    if ! command -v docker &>/dev/null; then
+        info "Устанавливаю Docker..."
+        curl -fsSL https://get.docker.com | sh
+        success "Docker установлен."
+    fi
+
+    if ! ensure_vpnguard_source_settings; then
+        press_enter
+        return
+    fi
+
+    if ! download_vpnguard_source; then
+        press_enter
+        return
+    fi
+
+    if ! generate_vpnguard_config; then
+        press_enter
+        return
+    fi
+
+    generate_vpnguard_compose
+    offer_disable_legacy_watchdog
+
+    info "Собираю и запускаю VPN Guard..."
+    if ! compose_vpnguard build --pull; then
+        error "Сборка контейнера завершилась ошибкой."
+        press_enter
+        return
+    fi
+
+    if ! compose_vpnguard up -d; then
+        error "Не удалось запустить контейнер VPN Guard."
+        press_enter
+        return
+    fi
+
+    success "VPN Guard установлен и запущен."
+    press_enter
+}
+
+do_start_vpnguard() {
+    header "Запуск VPN Guard"
+    compose_vpnguard up -d
+    press_enter
+}
+
+do_stop_vpnguard() {
+    header "Остановка VPN Guard"
+    compose_vpnguard stop
+    press_enter
+}
+
+do_restart_vpnguard() {
+    header "Перезапуск VPN Guard"
+    compose_vpnguard restart
+    press_enter
+}
+
+do_logs_vpnguard() {
+    header "Логи VPN Guard"
+    compose_vpnguard logs --tail=200 -f
+}
+
+do_interactive_vpnguard() {
+    header "Интерактивная фильтрация VPN Guard"
+    info "Для сохранения результата используйте путь внутри /reports, например /reports/result.txt"
+    compose_vpnguard run --rm vpnguard --interactive
+    press_enter
+}
+
+do_report_vpnguard() {
+    header "Сводный отчет VPN Guard"
+    info "Для сохранения отчета используйте путь внутри /reports, например /reports/report.txt"
+    compose_vpnguard run --rm vpnguard --report
+    press_enter
+}
+
+vpnguard_get_value() {
+    local key="$1"
+    awk -F': ' -v wanted="$key" '$1 == wanted {gsub(/"/, "", $2); print $2; exit}' "$VPNGUARD_CONFIG"
+}
+
+vpnguard_mask_token() {
+    local token="$1"
+    if [ -z "$token" ]; then
+        printf "(empty)"
+        return
+    fi
+    if [ "${#token}" -le 10 ]; then
+        printf "%s" "$token"
+        return
+    fi
+    printf "%s...%s" "${token:0:6}" "${token: -4}"
+}
+
+vpnguard_update_config_value() {
+    local pattern="$1"
+    local replacement="$2"
+    sed -i "s|^${pattern}:.*|${pattern}: ${replacement}|" "$VPNGUARD_CONFIG"
+}
+
+do_vpnguard_settings() {
+    if [ ! -f "$VPNGUARD_CONFIG" ]; then
+        error "Сначала установите VPN Guard."
+        press_enter
+        return
+    fi
+
+    while true; do
+        clear
+        header "Настройки VPN Guard"
+
+        local node_name bot_token chat_id threshold cooldown
+        node_name="$(vpnguard_get_value "node_name")"
+        bot_token="$(vpnguard_get_value "  bot_token")"
+        chat_id="$(vpnguard_get_value "  chat_id")"
+        threshold="$(vpnguard_get_value "  threshold")"
+        cooldown="$(vpnguard_get_value "  alert_cooldown")"
+
+        printf "Текущие значения:\n"
+        printf "  Node Name: %s\n" "${node_name}"
+        printf "  Bot Token: %s\n" "$(vpnguard_mask_token "$bot_token")"
+        printf "  Chat ID:   %s\n" "${chat_id:-"(empty)"}"
+        printf "  Порог:     %s\n" "${threshold}"
+        printf "  Кулдаун:   %s\n" "${cooldown}"
+        echo ""
+        printf "${BOLD}  1)${NC} Изменить Telegram Bot Token\n"
+        printf "${BOLD}  2)${NC} Изменить Telegram Chat ID\n"
+        printf "${BOLD}  3)${NC} Изменить имя ноды\n"
+        printf "${BOLD}  4)${NC} Изменить порог баллов\n"
+        printf "${BOLD}  5)${NC} Изменить кулдаун алерта\n"
+        printf "${BOLD}  6)${NC} Редактировать конфиг вручную (nano)\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        case "$choice" in
+            1)
+                read -rp "$(printf "${CYAN}Новый Telegram Bot Token: ${NC}")" value
+                vpnguard_update_config_value "  bot_token" "\"${value}\""
+                compose_vpnguard restart
+                ;;
+            2)
+                read -rp "$(printf "${CYAN}Новый Telegram Chat ID: ${NC}")" value
+                vpnguard_update_config_value "  chat_id" "\"${value}\""
+                compose_vpnguard restart
+                ;;
+            3)
+                read -rp "$(printf "${CYAN}Новое имя ноды: ${NC}")" value
+                vpnguard_update_config_value "node_name" "\"${value}\""
+                compose_vpnguard restart
+                ;;
+            4)
+                read -rp "$(printf "${CYAN}Новый порог баллов: ${NC}")" value
+                vpnguard_update_config_value "  threshold" "${value}"
+                compose_vpnguard restart
+                ;;
+            5)
+                read -rp "$(printf "${CYAN}Новый кулдаун (сек): ${NC}")" value
+                vpnguard_update_config_value "  alert_cooldown" "${value}"
+                compose_vpnguard restart
+                ;;
+            6)
+                nano "$VPNGUARD_CONFIG"
+                compose_vpnguard restart
+                ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+do_disable_watchdog() {
+    header "Отключение legacy watchdog"
+    if [ ! -f "/etc/systemd/system/xray-watchdog.service" ]; then
+        warn "Служба xray-watchdog.service не найдена."
+        press_enter
+        return
+    fi
+
+    systemctl stop xray-watchdog 2>/dev/null || true
+    systemctl disable xray-watchdog 2>/dev/null || true
+    success "Legacy watchdog остановлен и отключен."
+    press_enter
+}
+
+do_remove_watchdog() {
+    header "Удаление legacy watchdog"
+    read -rp "$(printf "${YELLOW}Удалить службу xray-watchdog и Python-файлы watchdog? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Удаление отменено."
+        press_enter
+        return
+    fi
+
+    systemctl stop xray-watchdog 2>/dev/null || true
+    systemctl disable xray-watchdog 2>/dev/null || true
+    rm -f /etc/systemd/system/xray-watchdog.service
+    systemctl daemon-reload
+    rm -f "${REMNA_DIR}/scan_detector.py" "${REMNA_DIR}/config.py"
+    success "Legacy watchdog удален."
+    press_enter
+}
+
+menu_vpnguard() {
+    while true; do
+        clear
+        header "VPN Guard"
+        printf "${BOLD}  1)${NC} Установить / Обновить VPN Guard\n"
+        printf "${BOLD}  2)${NC} Запустить контейнер\n"
+        printf "${BOLD}  3)${NC} Остановить контейнер\n"
+        printf "${BOLD}  4)${NC} Перезапустить контейнер\n"
+        printf "${BOLD}  5)${NC} Показать логи контейнера\n"
+        printf "${BOLD}  6)${NC} Интерактивная фильтрация\n"
+        printf "${BOLD}  7)${NC} Сводный отчет\n"
+        printf "${BOLD}  8)${NC} Настройки конфига VPN Guard\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_install_vpnguard ;;
+            2) do_start_vpnguard ;;
+            3) do_stop_vpnguard ;;
+            4) do_restart_vpnguard ;;
+            5) do_logs_vpnguard ;;
+            6) do_interactive_vpnguard ;;
+            7) do_report_vpnguard ;;
+            8) do_vpnguard_settings ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
+menu_watchdog_legacy() {
+    while true; do
+        clear
+        header "Legacy Watchdog"
+        printf "${BOLD}  1)${NC} Установить / переустановить старый Watchdog\n"
+        printf "${BOLD}  2)${NC} Отключить службу Watchdog\n"
+        printf "${BOLD}  3)${NC} Полностью удалить Watchdog\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+
+        case "$choice" in
+            1) do_install_watchdog ;;
+            2) do_disable_watchdog ;;
+            3) do_remove_watchdog ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
+}
+
 do_install_beszel() {
     header "Установка Beszel Agent"
 
@@ -2080,21 +2611,23 @@ menu_security() {
 menu_monitoring() {
     while true; do
         clear
-        header "Мониторинг и Логи"
-        printf "${BOLD}  1)${NC} 📊  Beszel Agent (Панель мониторинга)\n"
-        printf "${BOLD}  2)${NC} 🐕  Watchdog (Детектор сканирования)\n"
-        printf "${BOLD}  3)${NC} 📋  Настройка ротации логов (Logrotate)\n"
+        header "���������� � ����"
+        printf "${BOLD}  1)${NC} Beszel Agent (������ �����������)\n"
+        printf "${BOLD}  2)${NC} VPN Guard (Docker + ���������)\n"
+        printf "${BOLD}  3)${NC} Legacy Watchdog\n"
+        printf "${BOLD}  4)${NC} ��������� ������� ����� (Logrotate)\n"
         echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
+        printf "${BOLD}  0)${NC} < �����\n"
         echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        read -rp "$(printf "${CYAN}�������� ��������: ${NC}")" choice
 
         case "$choice" in
             1) do_install_beszel ;;
-            2) do_install_watchdog ;;
-            3) do_install_logs ;;
+            2) menu_vpnguard ;;
+            3) menu_watchdog_legacy ;;
+            4) do_install_logs ;;
             0) return ;;
-            *) warn "Неверный выбор." ; sleep 1 ;;
+            *) warn "�������� �����." ; sleep 1 ;;
         esac
     done
 }
@@ -2165,3 +2698,4 @@ main_menu() {
 # ─── Точка входа ─────────────────────────────────────────────
 require_root
 main_menu
+
