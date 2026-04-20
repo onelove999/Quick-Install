@@ -24,7 +24,6 @@ AGH_DIR="/opt/adguardhome"
 VPNGUARD_DIR="/opt/vpnguard"
 VPNGUARD_CONFIG="${VPNGUARD_DIR}/vpnguard.yaml"
 VPNGUARD_COMPOSE_FILE="${VPNGUARD_DIR}/docker-compose.yml"
-VPNGUARD_ENV_FILE="${VPNGUARD_DIR}/source.env"
 VPNGUARD_GITHUB_REPO="onelove999/Quick-Install"
 VPNGUARD_GITHUB_REF="main"
 
@@ -1657,26 +1656,12 @@ compose_vpnguard() {
 
 ensure_vpnguard_source_settings() {
     mkdir -p "$VPNGUARD_DIR"
-
-    cat > "$VPNGUARD_ENV_FILE" <<EOF
-GITHUB_REPO="${VPNGUARD_GITHUB_REPO}"
-GITHUB_REF="${VPNGUARD_GITHUB_REF}"
-EOF
-
     info "Источник VPN Guard: ${VPNGUARD_GITHUB_REPO}@${VPNGUARD_GITHUB_REF}"
 }
 
 download_vpnguard_source() {
-    if [ ! -f "$VPNGUARD_ENV_FILE" ]; then
-        error "Сначала задайте GitHub-источник."
-        return 1
-    fi
-
-    # shellcheck disable=SC1090
-    source "$VPNGUARD_ENV_FILE"
-
-    local repo="${GITHUB_REPO:-}"
-    local ref="${GITHUB_REF:-main}"
+    local repo="${VPNGUARD_GITHUB_REPO}"
+    local ref="${VPNGUARD_GITHUB_REF}"
     local archive_url="https://github.com/${repo}/archive/${ref}.tar.gz"
     local tmp_dir archive_file root_dir
 
@@ -2683,6 +2668,7 @@ main_menu() {
 # ─── Точка входа ─────────────────────────────────────────────
 require_root
 main_menu
+
 
 
 
