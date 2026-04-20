@@ -4,10 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"vpnguard/alerter"
 	"vpnguard/config"
