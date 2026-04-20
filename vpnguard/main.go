@@ -29,6 +29,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	tg := alerter.NewTelegram(cfg)
+
 	switch {
 	case interactive:
 		if err := cli.RunInteractive(cfg); err != nil {
@@ -36,12 +38,11 @@ func main() {
 			os.Exit(1)
 		}
 	case report:
-		if err := cli.RunReport(cfg); err != nil {
+		if err := cli.RunReport(cfg, tg); err != nil {
 			fmt.Fprintf(os.Stderr, "report mode failed: %v\n", err)
 			os.Exit(1)
 		}
 	default:
-		tg := alerter.NewTelegram(cfg)
 		monitor := daemon.NewMonitor(cfg, tg)
 		if err := monitor.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)

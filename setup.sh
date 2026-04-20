@@ -1735,7 +1735,7 @@ scoring:
     domain: 1
     ip: 3
     whitelist: 0
-    spam: 100
+    spam: 50
     local_net: 10
     ssh: 50
     suspicious_port: 30

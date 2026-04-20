@@ -4,9 +4,12 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
+	"vpnguard/alerter"
 	"vpnguard/config"
 	"vpnguard/daemon"
 )
@@ -17,7 +20,7 @@ type offenderScore struct {
 	Score int
 }
 
-func RunReport(cfg *config.Config) error {
+func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
 	files, err := collectLogFiles(cfg.LogFile)
 	if err != nil {
 		return err
@@ -106,7 +109,39 @@ func RunReport(cfg *config.Config) error {
 	if strings.TrimSpace(outPath) == "" {
 		outPath = "report.txt"
 	}
-	return os.WriteFile(outPath, []byte(output), 0o644)
+	if err := os.WriteFile(outPath, []byte(output), 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("Report saved to %s\n", outPath)
+
+	sendTg := prompt(reader, "Send report to Telegram? [y/N]: ")
+	if strings.ToLower(sendTg) == "y" {
+		fmt.Println("Sending to Telegram...")
+		summary := extractSummary(reportLines)
+		if err := tg.SendReport(cfg.NodeName, summary, []byte(output)); err != nil {
+			return fmt.Errorf("send telegram: %w", err)
+		}
+		fmt.Println("Sent successfully.")
+	}
+	return nil
+}
+
+func extractSummary(lines []string) string {
+	var summary []string
+	capture := true
+	for _, line := range lines {
+		if strings.Contains(line, "Emails with many unique IPs") {
+			capture = false
+		}
+		if capture && line != "" && !strings.Contains(line, "===") {
+			summary = append(summary, line)
+		}
+	}
+	if len(summary) > 15 {
+		summary = summary[:15]
+		summary = append(summary, "...")
+	}
+	return strings.Join(summary, "\n")
 }
 
 func isSuspicious(cfg *config.Config, port string) bool {

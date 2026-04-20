@@ -94,7 +94,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Scoring.Points.IP = 3
 	}
 	if cfg.Scoring.Points.Spam == 0 {
-		cfg.Scoring.Points.Spam = 100
+		cfg.Scoring.Points.Spam = 50
 	}
 	if cfg.Scoring.Points.LocalNet == 0 {
 		cfg.Scoring.Points.LocalNet = 10
