@@ -37,10 +37,94 @@ warn()    { printf "${YELLOW}[⚠]${NC} %b\n" "$*"; }
 error()   { printf "${RED}[✘]${NC} %b\n" "$*"; }
 
 header() {
+    local title="$1"
+    local parent="$2"
     echo ""
     printf "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
-    printf "${BOLD}  %s${NC}\n" "$*"
+    if [ -n "$parent" ]; then
+        printf "  ${MAGENTA}%s${NC} > ${BOLD}%s${NC}\n" "$parent" "$title"
+    else
+        printf "  ${BOLD}%s${NC}\n" "$title"
+    fi
     printf "${MAGENTA}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+}
+
+# ─── Функции статуса ─────────────────────────────────────────
+
+get_docker_status() {
+    local name="$1"
+    if ! command -v docker &>/dev/null; then
+        printf "${RED}(Docker не установлен)${NC}"
+        return
+    fi
+    if docker ps --format '{{.Names}}' | grep -q "^${name}$"; then
+        printf "${GREEN}(Запущен)${NC}"
+    elif docker ps -a --format '{{.Names}}' | grep -q "^${name}$"; then
+        printf "${YELLOW}(Остановлен)${NC}"
+    else
+        printf "${RED}(Не установлен)${NC}"
+    fi
+}
+
+get_bbr_status() {
+    if [ "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)" = "bbr" ]; then
+        printf "${GREEN}(Активен)${NC}"
+    else
+        printf "${RED}(Выключен)${NC}"
+    fi
+}
+
+get_ipv6_status() {
+    if [ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" = "0" ]; then
+        printf "${GREEN}(Включен)${NC}"
+    else
+        printf "${RED}(Выключен)${NC}"
+    fi
+}
+
+get_ufw_status() {
+    if ufw status | grep -q "Status: active"; then
+        printf "${GREEN}(Активен)${NC}"
+    else
+        printf "${RED}(Выключен)${NC}"
+    fi
+}
+
+# ─── Валидация ───────────────────────────────────────────────
+
+is_valid_ip() {
+    local ip=$1
+    [[ $ip =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]
+}
+
+is_valid_port() {
+    local port=$1
+    [[ $port =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]
+}
+
+# ─── Замер времени ───────────────────────────────────────────
+
+measure_time() {
+    local start=$(date +%s)
+    "$@"
+    local end=$(date +%s)
+    info "Выполнено за $((end - start)) сек."
+}
+
+# ─── Сводка системы ──────────────────────────────────────────
+
+show_system_info() {
+    local os=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)
+    local ip=$(curl -s4 ifconfig.me || echo "N/A")
+    local ram_total=$(free -h | awk '/Mem:/ {print $2}')
+    local ram_used=$(free -h | awk '/Mem:/ {print $3}')
+    local load=$(uptime | awk -F'load average:' '{print $2}' | xargs)
+    
+    printf "${BLUE}─── Информация о сервере ───────────────────────────${NC}\n"
+    printf "  OS:   %-20s | IP:   ${CYAN}%s${NC}\n" "$os" "$ip"
+    printf "  RAM:  %-20s | Load: %s\n" "$ram_used / $ram_total" "$load"
+    printf "  BBR:  %-20s | IPv6: %s\n" "$(get_bbr_status)" "$(get_ipv6_status)"
+    printf "${BLUE}─────────────────────────────────────────────────────${NC}\n"
 }
 
 press_enter() {
@@ -59,7 +143,7 @@ require_root() {
 # 1. ОБНОВЛЕНИЕ СИСТЕМЫ
 # ═══════════════════════════════════════════════════════════════
 do_update() {
-    header "Обновление системы"
+    header "Обновление системы" "Система"
     
     read -rp "$(printf "${YELLOW}Вы уверены, что хотите обновить систему (apt upgrade)? [y/N]: ${NC}")" confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -69,9 +153,9 @@ do_update() {
     fi
 
     info "Обновление списка пакетов..."
-    apt update
+    measure_time apt update
     info "Обновление установленных пакетов..."
-    apt upgrade -y
+    measure_time apt upgrade -y
     success "Система обновлена."
     press_enter
 }
@@ -138,8 +222,13 @@ ufw_disable() {
 }
 
 ufw_open_port() {
-    header "Открытие порта"
-    read -rp "Введите порт (или диапазон, напр. 8000:8100): " port
+    header "Открытие порта" "UFW"
+    local port
+    while true; do
+        read -rp "Введите порт (или диапазон, напр. 8000:8100): " port
+        if [ -z "$port" ]; then info "Отменено."; return; fi
+        if is_valid_port "${port%%:*}"; then break; else error "Неверный формат порта!"; fi
+    done
     read -rp "Протокол [tcp/udp/any] (Enter = any): " proto
     if [ -z "$proto" ] || [ "$proto" = "any" ]; then
         ufw allow "$port"
@@ -151,9 +240,16 @@ ufw_open_port() {
 }
 
 ufw_open_port_ip() {
-    header "Открытие порта для конкретного IP"
-    read -rp "Введите IP-адрес: " ip
-    read -rp "Введите порт: " port
+    header "Открытие порта для конкретного IP" "UFW"
+    local ip port
+    while true; do
+        read -rp "Введите IP-адрес: " ip
+        if is_valid_ip "$ip"; then break; else error "Неверный формат IP!"; fi
+    done
+    while true; do
+        read -rp "Введите порт: " port
+        if is_valid_port "$port"; then break; else error "Неверный формат порта!"; fi
+    done
     read -rp "Протокол [tcp/udp] (Enter = tcp): " proto
     proto=${proto:-tcp}
     ufw allow from "$ip" to any port "$port" proto "$proto"
@@ -298,23 +394,19 @@ ufw_delete_rule() {
 menu_ufw() {
     while true; do
         clear
-        header "Управление UFW"
+        header "Управление UFW" "Безопасность"
         
-        printf "${BLUE}─── Состояние ───────────────────────────────────────${NC}\n"
+        printf "${BLUE}─── Состояние: $(get_ufw_status) ──────────────────${NC}\n"
         printf "${BOLD}  1)${NC} Статус UFW (подробно)\n"
-        printf "${BOLD}  2)${NC} Включить UFW (Базово — только запуск)\n"
-        printf "${BOLD}  3)${NC} Включить UFW (Рекомендуется — +SSH +Limit)\n"
+        printf "${BOLD}  2)${NC} Включить UFW (Базово)\n"
+        printf "${BOLD}  3)${NC} Включить UFW (Рекомендуется)\n"
         printf "${BOLD}  4)${NC} Выключить UFW\n"
         echo ""
         printf "${BLUE}─── Управление портами ──────────────────────────────${NC}\n"
         printf "${BOLD}  5)${NC} Открыть порт (TCP/UDP)\n"
-        printf "${BOLD}  6)${NC} Открыть порт для конкретного IP\n"
+        printf "${BOLD}  6)${NC} Открыть порт для IP\n"
         printf "${BOLD}  7)${NC} Закрыть порт\n"
         printf "${BOLD}  8)${NC} Удалить правило по номеру\n"
-        echo ""
-        printf "${BLUE}─── Дополнительно ───────────────────────────────────${NC}\n"
-        printf "${BOLD}  9)${NC} Запретить пинг (ICMP DROP)\n"
-        printf "${BOLD} 10)${NC} Разрешить пинг (ICMP ACCEPT)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -404,12 +496,11 @@ do_start_node() {
     fi
 
     info "Запуск контейнера..."
-    cd "$REMNA_DIR" && docker compose up -d
+    measure_time bash -c "cd '$REMNA_DIR' && docker compose up -d"
 
     success "Контейнер запущен. Показываю логи (Ctrl+C для выхода)..."
     echo ""
     docker compose logs -f -t || true
-    press_enter
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -425,15 +516,14 @@ do_update_node() {
     fi
 
     info "Подтягивание новых образов (docker compose pull)..."
-    cd "$REMNA_DIR" && docker compose pull
+    measure_time bash -c "cd '$REMNA_DIR' && docker compose pull"
     
     info "Перезапуск контейнера..."
-    docker compose down && docker compose up -d
+    measure_time bash -c "cd '$REMNA_DIR' && docker compose down && docker compose up -d"
     
     success "Обновление завершено. Показываю логи (Ctrl+C для выхода)..."
     echo ""
     docker compose logs -f -t || true
-    press_enter
 }
 
 do_show_docker_logs() {
@@ -446,7 +536,6 @@ do_show_docker_logs() {
     info "Выход: Ctrl+C"
     echo ""
     cd "$REMNA_DIR" && docker compose logs -f
-    press_enter
 }
 
 do_stop_node() {
@@ -683,16 +772,15 @@ do_show_access_logs() {
     info "Выход: Ctrl+C"
     echo ""
     tail -f "$log_file"
-    press_enter
 }
 
 menu_geo() {
     while true; do
         clear
-        header "Управление Geo файлами"
-        printf "${BOLD}  1)${NC} 📥  Загрузить новый Geo файл\n"
-        printf "${BOLD}  2)${NC} 🔄  Обновить все сохраненные файлы (ручной)\n"
-        printf "${BOLD}  3)${NC} ⏰  Настройка автообновления (cron)\n"
+        header "Управление Geo файлами" "Нода"
+        printf "${BOLD}  1)${NC} Загрузить новый Geo файл\n"
+        printf "${BOLD}  2)${NC} Обновить все сохраненные файлы (ручной)\n"
+        printf "${BOLD}  3)${NC} Настройка автообновления (cron)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -711,20 +799,20 @@ menu_geo() {
 menu_node() {
     while true; do
         clear
-        header "Управление Нодой"
+        header "Управление Нодой" "Главное меню"
         
-        printf "${BLUE}─── Операции ────────────────────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} ▶️   Запустить (с логами)\n"
-        printf "${BOLD}  2)${NC} 🔄  Перезапустить\n"
-        printf "${BOLD}  3)${NC} 🛑  Остановить\n"
-        printf "${BOLD}  4)${NC} 📊  Только логи контейнера\n"
-        printf "${BOLD}  5)${NC} 🌐  Логи подключений (access.log)\n"
+        printf "${BLUE}─── Операции ─────────────────── $(get_docker_status "remnanode") ──${NC}\n"
+        printf "${BOLD}  1)${NC} Запустить (с логами)\n"
+        printf "${BOLD}  2)${NC} Перезапустить\n"
+        printf "${BOLD}  3)${NC} Остановить\n"
+        printf "${BOLD}  4)${NC} Только логи контейнера\n"
+        printf "${BOLD}  5)${NC} Логи подключений (access.log)\n"
         echo ""
         printf "${BLUE}─── Настройка ───────────────────────────────────────${NC}\n"
-        printf "${BOLD}  6)${NC} 🛠️  Установка ноды (Docker + Compose)\n"
-        printf "${BOLD}  7)${NC} 🔄  Обновить ноду (Docker Pull)\n"
-        printf "${BOLD}  8)${NC} 📝  Редактировать docker-compose.yml\n"
-        printf "${BOLD}  9)${NC} 🌍  Управление Geo файлами\n"
+        printf "${BOLD}  6)${NC} Установка ноды (Docker + Compose)\n"
+        printf "${BOLD}  7)${NC} Обновить ноду (Docker Pull)\n"
+        printf "${BOLD}  8)${NC} Редактировать docker-compose.yml\n"
+        printf "${BOLD}  9)${NC} Управление Geo файлами\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -812,7 +900,7 @@ do_test_cpu_sysbench() {
 menu_tests() {
     while true; do
         clear
-        header "Тесты и Бенчмарки"
+        header "Тесты и Бенчмарки" "Главное меню"
         printf "${BLUE}─── Проверка IP и Блокировок ────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} Проверка региона IP\n"
         printf "${BOLD}  2)${NC} Censorcheck: Проверка геоблока\n"
@@ -1110,10 +1198,11 @@ do_enable_ipv6() {
 menu_ipv6() {
     while true; do
         clear
-        header "Управление IPv6"
-        printf "${BOLD}  1)${NC} 📊  Статус IPv6\n"
-        printf "${BOLD}  2)${NC} 🛑  Отключить IPv6\n"
-        printf "${BOLD}  3)${NC} ✅  Включить IPv6\n"
+        header "Управление IPv6" "Система"
+        printf "${BLUE}─── Состояние: $(get_ipv6_status) ─────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} Статус IPv6\n"
+        printf "${BOLD}  2)${NC} Отключить IPv6\n"
+        printf "${BOLD}  3)${NC} Включить IPv6\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -1887,7 +1976,7 @@ do_install_vpnguard() {
 
     if ! command -v docker &>/dev/null; then
         info "Устанавливаю Docker..."
-        curl -fsSL https://get.docker.com | sh
+        measure_time curl -fsSL https://get.docker.com | sh
         success "Docker установлен."
     fi
 
@@ -1910,7 +1999,7 @@ do_install_vpnguard() {
     offer_disable_legacy_watchdog
 
     info "Собираю и запускаю VPN Guard..."
-    if ! compose_vpnguard build --pull; then
+    if ! measure_time compose_vpnguard build --pull; then
         error "Сборка контейнера завершилась ошибкой."
         press_enter
         return
@@ -2094,7 +2183,8 @@ do_remove_watchdog() {
 menu_vpnguard() {
     while true; do
         clear
-        header "VPN Guard"
+        header "VPN Guard" "Мониторинг"
+        printf "${BLUE}─── Состояние: $(get_docker_status "vpnguard") ───────────────${NC}\n"
         printf "${BOLD}  1)${NC} Установить / Обновить VPN Guard\n"
         printf "${BOLD}  2)${NC} Запустить контейнер\n"
         printf "${BOLD}  3)${NC} Остановить контейнер\n"
@@ -2260,7 +2350,7 @@ do_install_warp() {
 
     # 2. Установка WireGuard
     info "Установка WireGuard..."
-    apt-get update -qq && apt-get install -y wireguard wget curl jq
+    measure_time bash -c "apt-get update -qq && apt-get install -y wireguard wget curl jq"
     
     # 3. Скачивание wgcf
     info "Скачивание wgcf..."
@@ -2337,7 +2427,7 @@ do_install_warp() {
 menu_warp() {
     while true; do
         clear
-        header "Управление Cloudflare WARP"
+        header "Cloudflare WARP" "Приложения"
         printf "${BOLD}  1)${NC} Установить WARP\n"
         printf "${BOLD}  2)${NC} Удалить WARP\n"
         printf "${BOLD}  3)${NC} Показать статус (wg show)\n"
@@ -2418,7 +2508,6 @@ EOF
     cd "${AGH_DIR}" && docker compose up -d
     
     success "AdGuard Home установлен и запущен."
-    press_enter
 }
 
 do_start_adguard() {
@@ -2445,7 +2534,6 @@ do_restart_adguard() {
 do_logs_adguard() {
     header "Логи AdGuard Home"
     cd "${AGH_DIR}" && docker compose logs -f --tail=100
-    press_enter
 }
 
 do_edit_adguard_yaml() {
@@ -2488,14 +2576,15 @@ do_overwrite_adguard_yaml() {
 menu_adguard() {
     while true; do
         clear
-        header "Управление AdGuard Home"
-        printf "${BOLD}  1)${NC} 🛠️  Установить AdGuard Home (с нуля)\n"
-        printf "${BOLD}  2)${NC} ▶️  Запустить\n"
-        printf "${BOLD}  3)${NC} 🛑  Остановить\n"
-        printf "${BOLD}  4)${NC} 🔄  Перезапустить\n"
-        printf "${BOLD}  5)${NC} 📊  Показать логи\n"
-        printf "${BOLD}  6)${NC} 📝  Редактировать AdGuardHome.yaml\n"
-        printf "${BOLD}  7)${NC} 🧨  ПЕРЕЗАПИСАТЬ AdGuardHome.yaml (Очистить)\n"
+        header "AdGuard Home" "Приложения"
+        printf "${BLUE}─── Состояние: $(get_docker_status "adguardhome") ────────────${NC}\n"
+        printf "${BOLD}  1)${NC} Установить AdGuard Home (с нуля)\n"
+        printf "${BOLD}  2)${NC} Запустить\n"
+        printf "${BOLD}  3)${NC} Остановить\n"
+        printf "${BOLD}  4)${NC} Перезапустить\n"
+        printf "${BOLD}  5)${NC} Показать логи\n"
+        printf "${BOLD}  6)${NC} Редактировать AdGuardHome.yaml\n"
+        printf "${BOLD}  7)${NC} ПЕРЕЗАПИСАТЬ AdGuardHome.yaml (Очистить)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -2542,15 +2631,15 @@ do_trafficguard() {
 menu_system() {
     while true; do
         clear
-        header "Система и Сеть"
+        header "Система и Сеть" "Главное меню"
         printf "${BLUE}─── Базовые настройки ───────────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} 📦  Обновление системы (APT upgrade)\n"
-        printf "${BOLD}  2)${NC} 💾  Настройка SWAP\n"
+        printf "${BOLD}  1)${NC} Обновление системы (APT upgrade)\n"
+        printf "${BOLD}  2)${NC} Настройка SWAP\n"
         echo ""
         printf "${BLUE}─── Сетевые настройки ───────────────────────────────${NC}\n"
-        printf "${BOLD}  3)${NC} ⚡  Установка TCP BBR (Ускорение сети)\n"
-        printf "${BOLD}  4)${NC} 🚀  Продвинутый тюнинг сети (VPN)\n"
-        printf "${BOLD}  5)${NC} 🌐  Управление IPv6\n"
+        printf "${BOLD}  3)${NC} Установка TCP BBR (Ускорение сети)\n"
+        printf "${BOLD}  4)${NC} Продвинутый тюнинг сети (VPN)\n"
+        printf "${BOLD}  5)${NC} Управление IPv6\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -2571,9 +2660,9 @@ menu_system() {
 menu_security() {
     while true; do
         clear
-        header "Безопасность и Firewall"
-        printf "${BOLD}  1)${NC} 🔥  Настройка Фаервола (UFW)\n"
-        printf "${BOLD}  2)${NC} 🛡️  Trafficguard Pro Manager\n"
+        header "Безопасность" "Главное меню"
+        printf "${BOLD}  1)${NC} Настройка Фаервола (UFW)\n"
+        printf "${BOLD}  2)${NC} Trafficguard Pro Manager\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -2591,7 +2680,7 @@ menu_security() {
 menu_monitoring() {
     while true; do
         clear
-        header "Мониторинг и Логи"
+        header "Мониторинг" "Главное меню"
         printf "${BOLD}  1)${NC} Beszel Agent (Панель мониторинга)\n"
         printf "${BOLD}  2)${NC} VPN Guard (Docker + Аналитика)\n"
         printf "${BOLD}  3)${NC} Legacy Watchdog\n"
@@ -2615,9 +2704,9 @@ menu_monitoring() {
 menu_apps() {
     while true; do
         clear
-        header "Дополнительные сервисы"
-        printf "${BOLD}  1)${NC} 🛡️  AdGuard Home (DNS-фильтрация)\n"
-        printf "${BOLD}  2)${NC} ☁️  Cloudflare WARP (VPN для сервера)\n"
+        header "Сервисы" "Главное меню"
+        printf "${BOLD}  1)${NC} AdGuard Home (DNS-фильтрация)\n"
+        printf "${BOLD}  2)${NC} Cloudflare WARP (VPN для сервера)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -2645,6 +2734,9 @@ main_menu() {
         echo "  │                                             │"
         echo "  └─────────────────────────────────────────────┘"
         printf "${NC}\n"
+
+        show_system_info
+        echo ""
 
         printf "${BLUE}─── Управление ──────────────────────────────────────${NC}\n"
         printf "${BOLD}  1)${NC} ⚙️  Система и Сеть\n"
