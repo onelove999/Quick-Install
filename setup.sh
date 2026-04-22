@@ -1717,6 +1717,12 @@ generate_vpnguard_config() {
     node_name="${node_name:-$default_node_name}"
     read -rp "$(printf "${CYAN}Telegram Bot Token (можно оставить пустым): ${NC}")" tg_bot_token
     read -rp "$(printf "${CYAN}Telegram Chat ID (можно оставить пустым): ${NC}")" tg_chat_id
+    read -rp "$(printf "${CYAN}Gemini 2.5 API Token (AI анализ, можно оставить пустым): ${NC}")" tg_gemini_token
+
+    local ai_enabled="false"
+    if [ -n "$tg_gemini_token" ]; then
+        ai_enabled="true"
+    fi
 
     cat > "$VPNGUARD_CONFIG" <<EOF
 node_name: "${node_name}"
@@ -1726,6 +1732,10 @@ alert_log: "/app/guard_alerts.log"
 telegram:
   bot_token: "${tg_bot_token}"
   chat_id: "${tg_chat_id}"
+
+ai:
+  enabled: ${ai_enabled}
+  gemini_token: "${tg_gemini_token}"
 
 scoring:
   threshold: 800

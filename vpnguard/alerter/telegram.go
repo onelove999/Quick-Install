@@ -33,8 +33,13 @@ func (t *Telegram) SendAlert(nodeName string, alert *daemon.Alert) error {
 		return nil
 	}
 
+	aiBlock := ""
+	if alert.AIResult != "" {
+		aiBlock = fmt.Sprintf("\n\n🤖 <b>AI Analysis:</b>\n%s", escapeHTML(alert.AIResult))
+	}
+
 	message := fmt.Sprintf(
-		"🚨 <b>VPN Guard</b> [%s]\n\nIP: <code>%s</code>\nEmail: <code>%s</code>\nTarget: <code>%s:%s</code>\nScore: <b>%d</b> (limit %d)\n\n<b>Breakdown:</b>\n%s",
+		"🚨 <b>VPN Guard</b> [%s]\n\nIP: <code>%s</code>\nEmail: <code>%s</code>\nTarget: <code>%s:%s</code>\nScore: <b>%d</b> (limit %d)%s\n\n<b>Breakdown:</b>\n%s",
 		nodeName,
 		alert.IP,
 		emptyFallback(alert.Email, "unknown"),
@@ -42,8 +47,13 @@ func (t *Telegram) SendAlert(nodeName string, alert *daemon.Alert) error {
 		alert.Port,
 		alert.Score,
 		alert.Threshold,
+		aiBlock,
 		alert.Breakdown,
 	)
+
+	if alert.AIError != "" {
+		message += fmt.Sprintf("\n\n⚠️ <i>AI Error: %s</i>", escapeHTML(alert.AIError))
+	}
 
 	if err := t.sendMessage(message); err != nil {
 		return err
@@ -167,6 +177,11 @@ func lastLines(lines []string, limit int) []string {
 		return lines
 	}
 	return lines[len(lines)-limit:]
+}
+
+func escapeHTML(text string) string {
+	replacer := strings.NewReplacer("<", "&lt;", ">", "&gt;", "&", "&amp;")
+	return replacer.Replace(text)
 }
 
 func emptyFallback(value, fallback string) string {

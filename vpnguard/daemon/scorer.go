@@ -33,6 +33,8 @@ type Alert struct {
 	Threshold   int
 	Breakdown   string
 	RecentLines []string
+	AIResult    string
+	AIError     string
 }
 
 type Scorer struct {
@@ -66,8 +68,8 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 	now := entry.Timestamp
 	state.LastSeen = now
 	state.RecentLogLines = append(state.RecentLogLines, entry.Raw)
-	if len(state.RecentLogLines) > 50 {
-		state.RecentLogLines = append([]string(nil), state.RecentLogLines[len(state.RecentLogLines)-50:]...)
+	if len(state.RecentLogLines) > 5000 {
+		state.RecentLogLines = append([]string(nil), state.RecentLogLines[len(state.RecentLogLines)-5000:]...)
 	}
 
 	state.Events = append(state.Events, ScoreEvent{
@@ -109,6 +111,16 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 		Breakdown:   formatBreakdown(breakdown),
 		RecentLines: append([]string(nil), state.RecentLogLines...),
 	}
+}
+
+func (s *Scorer) GetRecentLogs(ip string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.states[ip]
+	if !ok {
+		return nil
+	}
+	return append([]string(nil), state.RecentLogLines...)
 }
 
 func (s *Scorer) GC(now time.Time) {

@@ -43,7 +43,11 @@ func main() {
 			os.Exit(1)
 		}
 	default:
-		monitor := daemon.NewMonitor(cfg, tg)
+		var ai daemon.AIAnalyzer
+		if cfg.AI.Enabled {
+			ai = alerter.NewGemini(cfg)
+		}
+		monitor := daemon.NewMonitor(cfg, tg, ai)
 		if err := monitor.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "daemon failed: %v\n", err)
 			os.Exit(1)

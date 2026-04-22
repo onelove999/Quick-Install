@@ -6,6 +6,10 @@ telegram:
   bot_token: "PUT_YOUR_BOT_TOKEN_HERE"
   chat_id: "PUT_YOUR_CHAT_ID_HERE"
 
+ai:
+  enabled: false
+  gemini_token: ""
+
 scoring:
   threshold: 800
   window_seconds: 60

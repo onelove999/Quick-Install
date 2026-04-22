@@ -15,8 +15,14 @@ type Config struct {
 	AlertLog string `yaml:"alert_log"`
 
 	Telegram TelegramConfig `yaml:"telegram"`
-	Scoring  ScoringConfig  `yaml:"scoring"`
+	Scoring   ScoringConfig   `yaml:"scoring"`
 	Whitelist WhitelistConfig `yaml:"whitelist"`
+	AI        AIConfig        `yaml:"ai"`
+}
+
+type AIConfig struct {
+	Enabled     bool   `yaml:"enabled"`
+	GeminiToken string `yaml:"gemini_token"`
 }
 
 type TelegramConfig struct {

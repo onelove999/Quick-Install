@@ -19,17 +19,23 @@ type AlertSender interface {
 	SendAlert(nodeName string, alert *Alert) error
 }
 
+type AIAnalyzer interface {
+	Analyze(logs []string) (string, error)
+}
+
 type Monitor struct {
 	cfg    *config.Config
 	alerts AlertSender
+	ai     AIAnalyzer
 	scorer *Scorer
 	logger *log.Logger
 }
 
-func NewMonitor(cfg *config.Config, alerts AlertSender) *Monitor {
+func NewMonitor(cfg *config.Config, alerts AlertSender, ai AIAnalyzer) *Monitor {
 	return &Monitor{
 		cfg:    cfg,
 		alerts: alerts,
+		ai:     ai,
 		scorer: NewScorer(cfg),
 		logger: log.New(os.Stdout, "vpnguard: ", log.LstdFlags),
 	}
@@ -150,9 +156,7 @@ func (m *Monitor) readNewLines(file *os.File, offset *int64) error {
 					if recErr := m.recordAlert(alert); recErr != nil {
 						m.logger.Printf("alert log error: %v", recErr)
 					}
-					if tgErr := m.alerts.SendAlert(m.cfg.NodeName, alert); tgErr != nil {
-						m.logger.Printf("telegram alert failed: %v", tgErr)
-					}
+					go m.processAlertAsync(alert, entry.SourceIP)
 				}
 			}
 		}
@@ -184,4 +188,28 @@ func (m *Monitor) recordAlert(alert *Alert) error {
 		alert.Port,
 	)
 	return err
+}
+
+func (m *Monitor) processAlertAsync(alert *Alert, ip string) {
+	if m.ai != nil {
+		m.logger.Printf("waiting 30s to collect more logs for %s...", ip)
+		time.Sleep(30 * time.Second)
+		
+		recentLogs := m.scorer.GetRecentLogs(ip)
+		if len(recentLogs) > 0 {
+			alert.RecentLines = recentLogs
+		}
+		
+		aiResult, err := m.ai.Analyze(alert.RecentLines)
+		if err != nil {
+			m.logger.Printf("gemini api error: %v", err)
+			alert.AIError = err.Error()
+		} else {
+			alert.AIResult = aiResult
+		}
+	}
+
+	if tgErr := m.alerts.SendAlert(m.cfg.NodeName, alert); tgErr != nil {
+		m.logger.Printf("telegram alert failed: %v", tgErr)
+	}
 }
