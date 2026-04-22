@@ -145,18 +145,32 @@ require_root() {
 do_update() {
     header "Обновление системы" "Система"
     
-    read -rp "$(printf "${YELLOW}Вы уверены, что хотите обновить систему (apt upgrade)? [y/N]: ${NC}")" confirm
+    local os_desc=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)
+    info "Текущая система: ${BOLD}${os_desc}${NC}"
+    info "Запрашиваю список обновлений (apt update)..."
+    
+    measure_time apt-get update -qq
+    
+    local updatable=$(apt list --upgradable 2>/dev/null | grep -c "\[upgradable from:\|может быть обновлен" || echo "0")
+    
+    if [ "$updatable" -gt 0 ]; then
+        warn "Найдено пакетов для обновления: ${BOLD}${updatable}${NC}"
+    else
+        success "Система уже в актуальном состоянии."
+    fi
+
+    echo ""
+    read -rp "$(printf "${YELLOW}Выполнить полное обновление (apt upgrade)? [y/N]: ${NC}")" confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
         info "Обновление отменено."
         press_enter
         return
     fi
 
-    info "Обновление списка пакетов..."
-    measure_time apt update
-    info "Обновление установленных пакетов..."
-    measure_time apt upgrade -y
-    success "Система обновлена."
+    info "Запуск обновления пакетов..."
+    measure_time apt-get upgrade -y
+    
+    success "Обновление завершено."
     press_enter
 }
 
@@ -761,6 +775,68 @@ EOF
     press_enter
 }
 
+do_install_bbr() {
+    header "Установка TCP BBR" "Система"
+
+    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
+    local cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+    local kernel_ver=$(uname -r)
+
+    info "Текущее ядро: ${BOLD}${kernel_ver}${NC}"
+    info "Congestion Control: ${BOLD}${cur_cc}${NC}"
+    info "Default Qdisc: ${BOLD}${cur_qdisc}${NC}"
+
+    if [ "$cur_cc" = "bbr" ]; then
+        success "Вердикт: BBR уже активен."
+    else
+        warn "Вердикт: BBR не используется."
+    fi
+
+    echo ""
+    printf "Доступные действия:\n"
+    if [ "$cur_cc" = "bbr" ]; then
+        printf "${BOLD}  1)${NC} Обновить / Переустановить конфиг BBR\n"
+        printf "${BOLD}  2)${NC} ${RED}Отключить BBR${NC} (вернуться к дефолту)\n"
+    else
+        printf "${BOLD}  1)${NC} Включить TCP BBR\n"
+    fi
+    printf "${BOLD}  0)${NC} ← Назад\n"
+    echo ""
+    read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" bbr_choice
+
+    case "$bbr_choice" in
+        1)
+            info "Настройка BBR..."
+            measure_time bash -c "
+                modprobe tcp_bbr 2>/dev/null || true
+                sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+                sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+                mkdir -p /etc/sysctl.d
+                echo 'net.core.default_qdisc = fq' > $sysctl_file
+                echo 'net.ipv4.tcp_congestion_control = bbr' >> $sysctl_file
+                sysctl --system >/dev/null 2>&1
+            "
+            success "BBR настроен. Проверяем..."
+            sysctl net.ipv4.tcp_congestion_control
+            ;;
+        2)
+            if [ "$cur_cc" = "bbr" ]; then
+                info "Отключение BBR..."
+                measure_time bash -c "
+                    rm -f $sysctl_file
+                    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+                    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1
+                    sysctl --system >/dev/null 2>&1
+                "
+                success "BBR отключен."
+            fi
+            ;;
+        0|*) return ;;
+    esac
+    press_enter
+}
+
 do_show_access_logs() {
     header "Логи подключений (access.log)"
     local log_file="/var/log/remnanode/access.log"
@@ -937,152 +1013,175 @@ menu_tests() {
 # ═══════════════════════════════════════════════════════════════
 # 5. УСТАНОВКА BBR
 # ═══════════════════════════════════════════════════════════════
-get_bbr_status() {
+do_install_bbr() {
+    header "Установка TCP BBR"
+
+    # ─── Проверка текущего состояния ───
+    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
     local cur
     cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-    if [ "$cur" = "bbr" ]; then
-        printf "${GREEN}(Активен)${NC}"
-    else
-        printf "${RED}(Выключен)${NC}"
-    fi
-}
 
-do_bbr_status() {
-    header "Статус BBR" "BBR"
-    local cur
-    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-    local qdisc
-    qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
-    
-    info "Алгоритм TCP: ${BOLD}${cur}${NC}"
-    info "Очередь (qdisc): ${BOLD}${qdisc}${NC}"
-    
-    if [ "$cur" = "bbr" ]; then
-        success "BBR активен и работает корректно."
-    else
-        warn "BBR не активен (используется $cur)."
-    fi
-    press_enter
-}
+    if [ -f "$sysctl_file" ]; then
+        success "Конфигурация BBR найдена ($cur)."
+        echo ""
+        printf "${BOLD}  1)${NC} Переустановить / Обновить настройки BBR\n"
+        printf "${BOLD}  2)${NC} ${RED}Отключить и удалить BBR${NC} (вернуться к дефолту)\n"
+        printf "${BOLD}  0)${NC} Отмена\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" bbr_choice
 
-do_bbr_enable() {
-    header "Включение BBR" "BBR"
-    # Проверка ядра
+        case "$bbr_choice" in
+            1) info "Переустановка..." ;;
+            2)
+                rm -f "$sysctl_file"
+                info "Сбрасываю параметры на стандартные (cubic/fq_codel)..."
+                sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+                sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1
+                sysctl --system >/dev/null 2>&1
+                success "BBR отключен, файл конфигурации удален."
+                press_enter
+                return
+                ;;
+            *) info "Отменено."; press_enter; return ;;
+        esac
+    else
+        if [ "$cur" = "bbr" ]; then
+            warn "BBR активен, но файл $sysctl_file не найден (возможно, включено вручную)."
+        fi
+        read -rp "$(printf "${YELLOW}Включить TCP BBR? [y/N]: ${NC}")" confirm
+        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+            info "Отменено."
+            press_enter
+            return
+        fi
+    fi
+
+    # ─── Проверка ядра ───
     local full major minor ver
     full="$(uname -r)"
     ver="$(echo "$full" | awk -F'-' '{print $1}' | awk -F. '{print $1"."$2}')"
     major="$(echo "$ver" | cut -d. -f1)"
     minor="$(echo "$ver" | cut -d. -f2)"
 
-    if ! [ "$major" -gt 4 ] && ! { [ "$major" -eq 4 ] && [ "$minor" -ge 9 ]; }; then
-        error "Ядро старее 4.9 — BBR недоступен ($full)."
-        press_enter; return
+    info "Версия ядра: $full"
+
+    if [ "$major" -gt 4 ] || { [ "$major" -eq 4 ] && [ "$minor" -ge 9 ]; }; then
+        info "Ядро поддерживает BBR."
+    else
+        error "Ядро старее 4.9 — BBR недоступен. Обновите ядро."
+        press_enter
+        return
     fi
 
-    info "Применение параметров BBR..."
-    sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
+    # ─── Контейнеризация ───
+    local virt="unknown"
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        virt="$(systemd-detect-virt 2>/dev/null || true)"
+    fi
 
+    if [ -f /proc/user_beancounters ]; then
+        warn "Обнаружен OpenVZ. Включение BBR может быть невозможно."
+    fi
+
+    case "$virt" in
+        lxc|container|openvz|chroot|docker)
+            warn "Контейнерная среда: $virt. Возможны ограничения." ;;
+    esac
+
+    # ─── BBR доступность ───
+    local avail
+    avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+
+    if ! echo "$avail" | grep -qw bbr; then
+        info "BBR не найден, загружаю модуль tcp_bbr..."
+        modprobe tcp_bbr 2>/dev/null || true
+        avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
+        if ! echo "$avail" | grep -qw bbr; then
+            error "BBR недоступен даже после загрузки модуля."
+            press_enter
+            return
+        fi
+    fi
+
+    info "BBR доступен: $avail"
+
+    # ─── Применение ───
+    sysctl -w net.core.default_qdisc=fq
+    sysctl -w net.ipv4.tcp_congestion_control=bbr
+
+    # ─── Persist ───
+    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
     mkdir -p /etc/sysctl.d
-    cat > "/etc/sysctl.d/99-bbr.conf" <<EOF
+    cat >"$sysctl_file" <<EOF
+# TCP BBR — created by setup.sh $(date +%Y%m%d%H%M%S)
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
-    sysctl --system >/dev/null 2>&1
-    success "BBR успешно включен."
-    press_enter
-}
+    sysctl --system >/dev/null 2>&1 || true
 
-do_bbr_disable() {
-    header "Отключение BBR" "BBR"
-    rm -f "/etc/sysctl.d/99-bbr.conf"
-    info "Сброс на cubic/fq_codel..."
-    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
-    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1
-    sysctl --system >/dev/null 2>&1
-    success "BBR отключен."
+    # ─── Проверка ───
+    local cur
+    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    if [ "$cur" = "bbr" ]; then
+        success "BBR успешно включён и активен."
+    else
+        warn "BBR не активен ($cur). Попробуйте перезагрузить сервер."
+    fi
     press_enter
-}
-
-menu_bbr() {
-    while true; do
-        clear
-        header "Управление BBR" "Система"
-        printf "${BLUE}─── Состояние: $(get_bbr_status) ──────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Статус BBR (подробно)\n"
-        printf "${BOLD}  2)${NC} Включить/Обновить BBR\n"
-        printf "${BOLD}  3)${NC} Отключить BBR\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
-        case "$choice" in
-            1) do_bbr_status ;;
-            2) do_bbr_enable ;;
-            3) do_bbr_disable ;;
-            0) return ;;
-            *) warn "Неверный выбор." ; sleep 1 ;;
-        esac
-    done
 }
 
 # ═══════════════════════════════════════════════════════════════
 # 5.5 НАСТРОЙКА SWAP
 # ═══════════════════════════════════════════════════════════════
-do_swap_status() {
-    header "Статус SWAP" "SWAP"
-    free -h | awk '/Total|Mem|Swap/ {print "  " $0}'
+do_setup_swap() {
+    header "Настройка SWAP"
+    
+    # Показ текущего значения
+    local current_swap
+    current_swap=$(free -h | awk '/Swap:/ {print $2}')
+    info "Текущий размер SWAP в системе: ${BOLD}${current_swap}${NC}"
     echo ""
-    swapon --show
-    press_enter
-}
 
-do_swap_set() {
-    header "Настройка SWAP" "SWAP"
-    local swap_gb
-    read -rp "$(printf "${CYAN}Введите размер SWAP в ГБ [По умолчанию: 1, Нажмите Enter для 1]: ${NC}")" swap_gb
+    # Запрос на изменение
+    read -rp "$(printf "${YELLOW}Хотите изменить размер или пересоздать SWAP? [y/N]: ${NC}")" confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        info "Настройки оставлены без изменений."
+        press_enter
+        return
+    fi
+
+    echo ""
+    # Запрос размера SWAP
+    read -rp "$(printf "${CYAN}Введите новый размер SWAP в ГБ [По умолчанию: 1]: ${NC}")" swap_gb
     swap_gb=${swap_gb:-1}
-
-    if ! [[ "$swap_gb" =~ ^[0-9]+$ ]]; then
-        error "Размер должен быть числом!"; press_enter; return
+    
+    # Проверка на число
+    if [[ ! "$swap_gb" =~ ^[0-9]+$ ]]; then
+        error "Размер должен быть числом!"
+        press_enter
+        return
     fi
 
     info "Настройка SWAP файла на ${swap_gb}GB..."
+    
+    # Команда настройки
     swapoff /swapfile 2>/dev/null || true
-    if measure_time fallocate -l "${swap_gb}G" /swapfile; then
+    if fallocate -l "${swap_gb}G" /swapfile; then
         chmod 600 /swapfile
-        mkswap /swapfile >/dev/null
+        mkswap /swapfile
         swapon /swapfile
+        
+        # Добавление в fstab если нет
         if ! grep -qE '^/swapfile\s' /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
         fi
-        success "SWAP на ${swap_gb}GB успешно настроен."
+        
+        success "SWAP на ${swap_gb}GB успешно настроен и активирован."
     else
-        error "Не удалось создать swap-файл."
+        error "Не удалось создать swap-файл. Проверьте свободное место."
     fi
+    
     press_enter
-}
-
-menu_swap() {
-    while true; do
-        clear
-        header "Управление SWAP" "Система"
-        local cur_swap
-        cur_swap=$(free -h | awk '/Swap:/ {print $2}')
-        printf "${BLUE}─── Текущий размер: ${BOLD}${cur_swap}${NC} ──────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Статус SWAP (подробно)\n"
-        printf "${BOLD}  2)${NC} Создать / Изменить размер SWAP\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
-        case "$choice" in
-            1) do_swap_status ;;
-            2) do_swap_set ;;
-            0) return ;;
-            *) warn "Неверный выбор." ; sleep 1 ;;
-        esac
-    done
 }
 
 
@@ -1200,34 +1299,36 @@ menu_ipv6() {
 # ═══════════════════════════════════════════════════════════════
 
 do_network_tuning() {
-    header "Настройка сети ядра для VPN"
+    header "Продвинутый тюнинг сети" "Система"
     local conf_file="/etc/sysctl.d/99-vpn-tuning.conf"
+    
+    local rmem=$(sysctl -n net.core.rmem_max 2>/dev/null)
+    local wmem=$(sysctl -n net.core.wmem_max 2>/dev/null)
+    local fastopen=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)
+
+    info "TCP Read Buffer (max): ${BOLD}${rmem}${NC}"
+    info "TCP Write Buffer (max): ${BOLD}${wmem}${NC}"
+    info "TCP FastOpen status:   ${BOLD}${fastopen}${NC}"
 
     if [ -f "$conf_file" ]; then
-        success "Тюнинг в данный момент АКТИВИРОВАН (файл найден)."
-        echo ""
-        read -rp "$(printf "${YELLOW}Вы хотите ОТКЛЮЧИТЬ тюнинг и удалить настройки? [y/N]: ${NC}")" confirm
+        success "Вердикт: Продвинутый тюнинг АКТИВИРОВАН."
+    else
+        warn "Вердикт: Используются стандартные параметры."
+    fi
+
+    echo ""
+    if [ -f "$conf_file" ]; then
+        read -rp "$(printf "${YELLOW}Вы хотите ОТКЛЮЧИТЬ тюнинг и вернуть стандартные настройки? [y/N]: ${NC}")" confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            rm -f "$conf_file"
-            info "Сброс параметров через sysctl --system..."
-            sysctl --system > /dev/null 2>&1
-            success "Тюнинг успешно отключен, файл настроек удален."
-        else
-            info "Действие отменено."
+            measure_time bash -c "rm -f $conf_file && sysctl --system > /dev/null 2>&1"
+            success "Тюнинг успешно отключен."
         fi
     else
-        warn "Тюнинг в данный момент НЕ АКТИВИРОВАН."
-        echo ""
-        info "Будут применены следующие параметры:"
-        info "${YELLOW}(Рекомендуется предварительно включить BBR в основном меню)${NC}"
-        echo "  - Увеличение буферов TCP (rmem/wmem) до 64МБ"
-        echo "  - Оптимизация очередей (backlog, somaxconn)"
-        echo "  - Включение TCP FastOpen и MTU Probing"
-        echo ""
-        read -rp "$(printf "${CYAN}Вы хотите ВКЛЮЧИТЬ продвинутый тюнинг? [y/N]: ${NC}")" confirm
+        read -rp "$(printf "${CYAN}Вы хотите ВКЛЮЧИТЬ продвинутый тюнинг для VPN? [y/N]: ${NC}")" confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            info "Запись параметров в $conf_file..."
-            cat > "$conf_file" <<EOF
+            info "Запись параметров..."
+            measure_time bash -c "
+                cat > $conf_file <<EOF
 net.ipv4.conf.all.rp_filter=0
 net.ipv4.conf.default.rp_filter=0
 net.core.rmem_max=67108864
@@ -1241,11 +1342,9 @@ net.ipv4.tcp_rmem=4096 87380 67108864
 net.ipv4.tcp_wmem=4096 65536 67108864
 net.ipv4.tcp_mtu_probing=1
 EOF
-            info "Применение сетевых параметров..."
-            sysctl --system > /dev/null 2>&1
-            success "Сетевые параметры успешно применены!"
-        else
-            info "Действие отменено."
+                sysctl --system > /dev/null 2>&1
+            "
+            success "Сетевые параметры успешно применены."
         fi
     fi
     press_enter
@@ -2624,9 +2723,9 @@ menu_system() {
 
         case "$choice" in
             1) do_update ;;
-            2) menu_swap ;;
-            3) menu_bbr ;;
-            4) menu_tuning ;;
+            2) do_setup_swap ;;
+            3) do_install_bbr ;;
+            4) do_network_tuning ;;
             5) menu_ipv6 ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
