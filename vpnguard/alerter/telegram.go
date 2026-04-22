@@ -154,7 +154,7 @@ func (t *Telegram) sendMessage(text string) error {
 
 func (t *Telegram) sendDocument(alert *daemon.Alert) error {
 	tempFile := filepath.Join(os.TempDir(), fmt.Sprintf("vpnguard_%s.log", sanitizeFilename(alert.IP)))
-	content := strings.Join(lastLines(alert.RecentLines, 30), "\n") + "\n"
+	content := strings.Join(alert.RecentLines, "\n") + "\n"
 	if err := os.WriteFile(tempFile, []byte(content), 0o600); err != nil {
 		return err
 	}

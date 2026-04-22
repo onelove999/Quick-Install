@@ -43,6 +43,14 @@ func main() {
 			os.Exit(1)
 		}
 	default:
+		fmt.Printf("🛡️ VPN Guard starting (Node: %s)\n", cfg.NodeName)
+		fmt.Printf("📍 Monitoring: %s\n", cfg.LogFile)
+		if cfg.AI.Enabled {
+			fmt.Println("🤖 AI Analysis: Enabled (Gemini 2.5 Flash)")
+		} else {
+			fmt.Println("🤖 AI Analysis: Disabled")
+		}
+
 		var ai daemon.AIAnalyzer
 		if cfg.AI.Enabled {
 			ai = alerter.NewGemini(cfg)

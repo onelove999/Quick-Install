@@ -95,11 +95,12 @@ func (m *Monitor) tailFile() error {
 			return err
 		}
 		offset = 0
+		m.logger.Printf("opened log file: %s", fileName)
 		return nil
 	}
 
 	if err := openCurrent(true); err != nil {
-		return fmt.Errorf("open log file: %w", err)
+		m.logger.Printf("warning: could not open log file initially: %v", err)
 	}
 
 	pollTicker := time.NewTicker(2 * time.Second)
@@ -191,8 +192,10 @@ func (m *Monitor) recordAlert(alert *Alert) error {
 }
 
 func (m *Monitor) processAlertAsync(alert *Alert, ip string) {
+	m.logger.Printf("ALERT triggered for %s (Score: %d). Starting processing...", ip, alert.Score)
+	
 	if m.ai != nil {
-		m.logger.Printf("waiting 30s to collect more logs for %s...", ip)
+		m.logger.Printf("[%s] waiting 30s to collect more context for AI...", ip)
 		time.Sleep(30 * time.Second)
 		
 		recentLogs := m.scorer.GetRecentLogs(ip)
