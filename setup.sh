@@ -937,175 +937,152 @@ menu_tests() {
 # ═══════════════════════════════════════════════════════════════
 # 5. УСТАНОВКА BBR
 # ═══════════════════════════════════════════════════════════════
-do_install_bbr() {
-    header "Установка TCP BBR"
-
-    # ─── Проверка текущего состояния ───
-    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
+get_bbr_status() {
     local cur
     cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-
-    if [ -f "$sysctl_file" ]; then
-        success "Конфигурация BBR найдена ($cur)."
-        echo ""
-        printf "${BOLD}  1)${NC} Переустановить / Обновить настройки BBR\n"
-        printf "${BOLD}  2)${NC} ${RED}Отключить и удалить BBR${NC} (вернуться к дефолту)\n"
-        printf "${BOLD}  0)${NC} Отмена\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" bbr_choice
-
-        case "$bbr_choice" in
-            1) info "Переустановка..." ;;
-            2)
-                rm -f "$sysctl_file"
-                info "Сбрасываю параметры на стандартные (cubic/fq_codel)..."
-                sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
-                sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1
-                sysctl --system >/dev/null 2>&1
-                success "BBR отключен, файл конфигурации удален."
-                press_enter
-                return
-                ;;
-            *) info "Отменено."; press_enter; return ;;
-        esac
+    if [ "$cur" = "bbr" ]; then
+        printf "${GREEN}(Активен)${NC}"
     else
-        if [ "$cur" = "bbr" ]; then
-            warn "BBR активен, но файл $sysctl_file не найден (возможно, включено вручную)."
-        fi
-        read -rp "$(printf "${YELLOW}Включить TCP BBR? [y/N]: ${NC}")" confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            info "Отменено."
-            press_enter
-            return
-        fi
+        printf "${RED}(Выключен)${NC}"
     fi
+}
 
-    # ─── Проверка ядра ───
+do_bbr_status() {
+    header "Статус BBR" "BBR"
+    local cur
+    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+    local qdisc
+    qdisc="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+    
+    info "Алгоритм TCP: ${BOLD}${cur}${NC}"
+    info "Очередь (qdisc): ${BOLD}${qdisc}${NC}"
+    
+    if [ "$cur" = "bbr" ]; then
+        success "BBR активен и работает корректно."
+    else
+        warn "BBR не активен (используется $cur)."
+    fi
+    press_enter
+}
+
+do_bbr_enable() {
+    header "Включение BBR" "BBR"
+    # Проверка ядра
     local full major minor ver
     full="$(uname -r)"
     ver="$(echo "$full" | awk -F'-' '{print $1}' | awk -F. '{print $1"."$2}')"
     major="$(echo "$ver" | cut -d. -f1)"
     minor="$(echo "$ver" | cut -d. -f2)"
 
-    info "Версия ядра: $full"
-
-    if [ "$major" -gt 4 ] || { [ "$major" -eq 4 ] && [ "$minor" -ge 9 ]; }; then
-        info "Ядро поддерживает BBR."
-    else
-        error "Ядро старее 4.9 — BBR недоступен. Обновите ядро."
-        press_enter
-        return
+    if ! [ "$major" -gt 4 ] && ! { [ "$major" -eq 4 ] && [ "$minor" -ge 9 ]; }; then
+        error "Ядро старее 4.9 — BBR недоступен ($full)."
+        press_enter; return
     fi
 
-    # ─── Контейнеризация ───
-    local virt="unknown"
-    if command -v systemd-detect-virt >/dev/null 2>&1; then
-        virt="$(systemd-detect-virt 2>/dev/null || true)"
-    fi
+    info "Применение параметров BBR..."
+    sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
+    sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
 
-    if [ -f /proc/user_beancounters ]; then
-        warn "Обнаружен OpenVZ. Включение BBR может быть невозможно."
-    fi
-
-    case "$virt" in
-        lxc|container|openvz|chroot|docker)
-            warn "Контейнерная среда: $virt. Возможны ограничения." ;;
-    esac
-
-    # ─── BBR доступность ───
-    local avail
-    avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-
-    if ! echo "$avail" | grep -qw bbr; then
-        info "BBR не найден, загружаю модуль tcp_bbr..."
-        modprobe tcp_bbr 2>/dev/null || true
-        avail="$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || true)"
-        if ! echo "$avail" | grep -qw bbr; then
-            error "BBR недоступен даже после загрузки модуля."
-            press_enter
-            return
-        fi
-    fi
-
-    info "BBR доступен: $avail"
-
-    # ─── Применение ───
-    sysctl -w net.core.default_qdisc=fq
-    sysctl -w net.ipv4.tcp_congestion_control=bbr
-
-    # ─── Persist ───
-    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
     mkdir -p /etc/sysctl.d
-    cat >"$sysctl_file" <<EOF
-# TCP BBR — created by setup.sh $(date +%Y%m%d%H%M%S)
+    cat > "/etc/sysctl.d/99-bbr.conf" <<EOF
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
 EOF
-    sysctl --system >/dev/null 2>&1 || true
-
-    # ─── Проверка ───
-    local cur
-    cur="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
-    if [ "$cur" = "bbr" ]; then
-        success "BBR успешно включён и активен."
-    else
-        warn "BBR не активен ($cur). Попробуйте перезагрузить сервер."
-    fi
+    sysctl --system >/dev/null 2>&1
+    success "BBR успешно включен."
     press_enter
+}
+
+do_bbr_disable() {
+    header "Отключение BBR" "BBR"
+    rm -f "/etc/sysctl.d/99-bbr.conf"
+    info "Сброс на cubic/fq_codel..."
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
+    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || sysctl -w net.core.default_qdisc=pfifo_fast >/dev/null 2>&1
+    sysctl --system >/dev/null 2>&1
+    success "BBR отключен."
+    press_enter
+}
+
+menu_bbr() {
+    while true; do
+        clear
+        header "Управление BBR" "Система"
+        printf "${BLUE}─── Состояние: $(get_bbr_status) ──────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} Статус BBR (подробно)\n"
+        printf "${BOLD}  2)${NC} Включить/Обновить BBR\n"
+        printf "${BOLD}  3)${NC} Отключить BBR\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        case "$choice" in
+            1) do_bbr_status ;;
+            2) do_bbr_enable ;;
+            3) do_bbr_disable ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
 }
 
 # ═══════════════════════════════════════════════════════════════
 # 5.5 НАСТРОЙКА SWAP
 # ═══════════════════════════════════════════════════════════════
-do_setup_swap() {
-    header "Настройка SWAP"
-    
-    # Показ текущего значения
-    local current_swap
-    current_swap=$(free -h | awk '/Swap:/ {print $2}')
-    info "Текущий размер SWAP в системе: ${BOLD}${current_swap}${NC}"
+do_swap_status() {
+    header "Статус SWAP" "SWAP"
+    free -h | awk '/Total|Mem|Swap/ {print "  " $0}'
     echo ""
+    swapon --show
+    press_enter
+}
 
-    # Запрос на изменение
-    read -rp "$(printf "${YELLOW}Хотите изменить размер или пересоздать SWAP? [y/N]: ${NC}")" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-        info "Настройки оставлены без изменений."
-        press_enter
-        return
-    fi
-
-    echo ""
-    # Запрос размера SWAP
-    read -rp "$(printf "${CYAN}Введите новый размер SWAP в ГБ [По умолчанию: 1]: ${NC}")" swap_gb
+do_swap_set() {
+    header "Настройка SWAP" "SWAP"
+    local swap_gb
+    read -rp "$(printf "${CYAN}Введите размер SWAP в ГБ [По умолчанию: 1, Нажмите Enter для 1]: ${NC}")" swap_gb
     swap_gb=${swap_gb:-1}
-    
-    # Проверка на число
-    if [[ ! "$swap_gb" =~ ^[0-9]+$ ]]; then
-        error "Размер должен быть числом!"
-        press_enter
-        return
+
+    if ! [[ "$swap_gb" =~ ^[0-9]+$ ]]; then
+        error "Размер должен быть числом!"; press_enter; return
     fi
 
     info "Настройка SWAP файла на ${swap_gb}GB..."
-    
-    # Команда настройки
     swapoff /swapfile 2>/dev/null || true
-    if fallocate -l "${swap_gb}G" /swapfile; then
+    if measure_time fallocate -l "${swap_gb}G" /swapfile; then
         chmod 600 /swapfile
-        mkswap /swapfile
+        mkswap /swapfile >/dev/null
         swapon /swapfile
-        
-        # Добавление в fstab если нет
         if ! grep -qE '^/swapfile\s' /etc/fstab; then
-            echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab
+            echo '/swapfile none swap sw 0 0' >> /etc/fstab
         fi
-        
-        success "SWAP на ${swap_gb}GB успешно настроен и активирован."
+        success "SWAP на ${swap_gb}GB успешно настроен."
     else
-        error "Не удалось создать swap-файл. Проверьте свободное место."
+        error "Не удалось создать swap-файл."
     fi
-    
     press_enter
+}
+
+menu_swap() {
+    while true; do
+        clear
+        header "Управление SWAP" "Система"
+        local cur_swap
+        cur_swap=$(free -h | awk '/Swap:/ {print $2}')
+        printf "${BLUE}─── Текущий размер: ${BOLD}${cur_swap}${NC} ──────────────────${NC}\n"
+        printf "${BOLD}  1)${NC} Статус SWAP (подробно)\n"
+        printf "${BOLD}  2)${NC} Создать / Изменить размер SWAP\n"
+        echo ""
+        printf "${BOLD}  0)${NC} ← Назад\n"
+        echo ""
+        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        case "$choice" in
+            1) do_swap_status ;;
+            2) do_swap_set ;;
+            0) return ;;
+            *) warn "Неверный выбор." ; sleep 1 ;;
+        esac
+    done
 }
 
 
@@ -2647,9 +2624,9 @@ menu_system() {
 
         case "$choice" in
             1) do_update ;;
-            2) do_setup_swap ;;
-            3) do_install_bbr ;;
-            4) do_network_tuning ;;
+            2) menu_swap ;;
+            3) menu_bbr ;;
+            4) menu_tuning ;;
             5) menu_ipv6 ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
