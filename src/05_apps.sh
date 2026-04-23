@@ -135,6 +135,31 @@ scoring:
   threshold: 800
   window_seconds: 60
   alert_cooldown: 120
+  points:
+    domain: 1
+    ip: 3
+    whitelist: 0
+    spam: 50
+    local_net: 10
+    ssh: 25
+    suspicious_port: 30
+  spam_ports:
+    - "25"
+    - "465"
+    - "587"
+  suspicious_ports:
+    - "22"
+    - "23"
+    - "445"
+    - "3389"
+    - "1433"
+    - "3306"
+  local_nets:
+    - "192.168."
+    - "10."
+    - "172.16."
+    - "127.0.0.1"
+    - "localhost"
 
 whitelist:
   domains:
