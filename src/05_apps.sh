@@ -112,6 +112,11 @@ generate_vpnguard_config() {
         ai_enabled="true"
     fi
 
+    if [ -d "$VPNGUARD_CONFIG" ]; then
+        warn "Обнаружена ошибочная папка $VPNGUARD_CONFIG (создана Docker), удаление..."
+        rm -rf "$VPNGUARD_CONFIG"
+    fi
+
     mkdir -p "$(dirname "$VPNGUARD_CONFIG")"
     cat > "$VPNGUARD_CONFIG" <<EOF
 node_name: "${node_name}"
