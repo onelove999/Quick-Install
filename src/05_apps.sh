@@ -121,7 +121,7 @@ do_vpnguard_settings() {
         printf "${BOLD}  4)${NC} Изменить порог баллов\n"
         printf "${BOLD}  5)${NC} Изменить кулдаун алерта\n"
         echo ""
-        printf "${BOLD}  6)${NC} 📝 Редактировать конфиг вручную (nano)\n"
+        printf "${BOLD}  6)${NC} Редактировать конфиг вручную (nano)\n"
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
 
@@ -177,7 +177,7 @@ menu_vpnguard() {
         printf "${BOLD}  6)${NC} Интерактивная фильтрация\n"
         printf "${BOLD}  7)${NC} Сводный отчет\n"
         echo ""
-        printf "${BOLD}  8)${NC} ⚙️  Настройки VPN Guard\n"
+        printf "${BOLD}  8)${NC} Настройки VPN Guard\n"
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
@@ -1030,6 +1030,8 @@ $LOG_DIR/*.log {
     notifempty
     copytruncate
 }
+EOF
+}
 
 menu_monitoring() {
     while true; do
@@ -1075,6 +1077,78 @@ menu_apps() {
     done
 }
 
+# ═══════════════════════════════════════════════════════════════
+# 6. ТЕСТЫ И БЕНЧМАРКИ (ДОПОЛНИТЕЛЬНО)
+# ═══════════════════════════════════════════════════════════════
+
+do_test_ip_region() {
+    header "Проверка региона IP" "Тесты"
+    info "Запрос данных от ip-api.com..."
+    echo ""
+    curl -s http://ip-api.com/json/ | jq . 2>/dev/null || curl -s http://ip-api.com/json/
+    echo ""
+    press_enter
+}
+
+do_test_censor_geoblock() {
+    header "Censorcheck: Геоблокировка" "Тесты"
+    info "Запуск скрипта censorcheck..."
+    curl -sL https://raw.githubusercontent.com/censorcheck/censorcheck/main/censorcheck.sh | bash -s -- --geo
+    press_enter
+}
+
+do_test_censor_dpi() {
+    header "Censorcheck: Проверка DPI" "Тесты"
+    info "Запуск полной проверки..."
+    curl -sL https://raw.githubusercontent.com/censorcheck/censorcheck/main/censorcheck.sh | bash
+    press_enter
+}
+
+do_test_ip_quality_place() {
+    header "IP.Check.Place" "Тесты"
+    info "Запуск скрипта от Check.Place..."
+    curl -L https://raw.githubusercontent.com/everStarry/IP.Check.Place/main/check.sh | bash
+    press_enter
+}
+
+do_test_ip_quality_check() {
+    header "IPQuality Index" "Тесты"
+    bash <(curl -Ls IP.Check.Place)
+    press_enter
+}
+
+do_test_iperf_ru() {
+    header "RU iPerf3 Speedtest" "Тесты"
+    info "Тестирование скорости до российских серверов..."
+    curl -sL https://raw.githubusercontent.com/m-on-key/iperfall/main/iperfall.sh | bash
+    press_enter
+}
+
+do_test_yabs() {
+    header "YABS (Yet Another Bench Script)" "Тесты"
+    info "Запуск полного бенчмарка (это может занять 5-10 минут)..."
+    curl -sL yabs.sh | bash
+    press_enter
+}
+
+do_test_bench_sh() {
+    header "Bench.sh" "Тесты"
+    info "Запуск классического теста..."
+    wget -qO- bench.sh | bash
+    press_enter
+}
+
+do_test_cpu_sysbench() {
+    header "CPU Benchmark (sysbench)" "Тесты"
+    if ! command -v sysbench &>/dev/null; then
+        info "Установка sysbench..."
+        apt-get update -qq && apt-get install -y sysbench > /dev/null
+    fi
+    info "Запуск теста (1 минута)..."
+    sysbench cpu --cpu-max-prime=20000 run
+    press_enter
+}
+
 menu_tests() {
     while true; do
         clear
@@ -1083,8 +1157,8 @@ menu_tests() {
         printf "${BOLD}  1)${NC} Проверка региона IP\n"
         printf "${BOLD}  2)${NC} Censorcheck: Проверка геоблока\n"
         printf "${BOLD}  3)${NC} Censorcheck: Проверка DPI (РФ)\n"
-        printf "${BOLD}  4)${NC} IP.Check.Place (English-info)\n"
-        printf "${BOLD}  5)${NC} IPQuality (Check.Place)\n"
+        printf "${BOLD}  4)${NC} IP.Check.Place (Full info)\n"
+        printf "${BOLD}  5)${NC} IPQuality (Score check)\n"
         echo ""
         printf "${BLUE}─── Скорость и Производительность ───────────────────${NC}\n"
         printf "${BOLD}  6)${NC} Скорость до RU iPerf3 серверов\n"
