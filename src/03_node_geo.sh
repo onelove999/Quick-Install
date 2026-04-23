@@ -97,7 +97,7 @@ do_show_docker_logs() {
     fi
     info "Выход: Ctrl+C"
     echo ""
-    cd "$REMNA_DIR" && docker compose logs -f
+    (trap - INT; cd "$REMNA_DIR" && docker compose logs -f)
 }
 
 do_stop_node() {
@@ -293,7 +293,8 @@ do_show_access_logs() {
     fi
     info "Выход: Ctrl+C"
     echo ""
-    tail -f "$log_file"
+    # Игнорируем прерывание в основном скрипте, чтобы Ctrl+C убивал только tail
+    (trap - INT; tail -f "$log_file")
 }
 
 menu_geo() {
