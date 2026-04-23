@@ -547,11 +547,26 @@ do_uninstall_warp() {
         press_enter
         return
     fi
+
+    info "Остановка интерфейса warp..."
+    if ip link show warp &>/dev/null; then
+        wg-quick down warp &>/dev/null || true
+    fi
     systemctl stop wg-quick@warp 2>/dev/null || true
     systemctl disable wg-quick@warp 2>/dev/null || true
+
+    info "Удаление файлов и пакетов..."
     rm -f /etc/wireguard/warp.conf /etc/wireguard/wgcf-account.toml
     rm -f /usr/local/bin/wgcf
     rm -f wgcf-profile.conf wgcf-account.toml 2>/dev/null
+
+    # Пакет wireguard удаляем только если пользователь уверен (может использоваться другими)
+    read -rp "$(printf "${YELLOW}Удалить пакет wireguard? [y/N]: ${NC}")" rm_wg
+    if [[ "$rm_wg" =~ ^[Yy]$ ]]; then
+        apt-get remove --purge -y wireguard
+        apt-get autoremove -y
+    fi
+
     success "WARP удалён."
     press_enter
 }
@@ -908,6 +923,46 @@ $LOG_DIR/*.log {
     copytruncate
 }
 EOF
+    success "Logrotate настроен."
+
+    # 4. Volume в docker-compose.yml
+    if [ -f "$COMPOSE_FILE" ]; then
+        cp "$COMPOSE_FILE" "$COMPOSE_FILE.bak"
+        if grep -q "/var/log/remnanode:/var/log/remnanode" "$COMPOSE_FILE"; then
+            info "Volume для логов уже есть в docker-compose.yml."
+        else
+            info "Добавляю volume в docker-compose.yml..."
+            if grep -E -q '^[ \t]+volumes:' "$COMPOSE_FILE"; then
+                awk -v vol="      - \"/var/log/remnanode:/var/log/remnanode\"" '/^[ \t]+volumes:/ && !done { print; print vol; done=1; next } 1' "$COMPOSE_FILE" > "${COMPOSE_FILE}.tmp" && mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE"
+            else
+                sed -i '/SECRET_KEY/a \    volumes:\n      - "/var/log/remnanode:/var/log/remnanode"' "$COMPOSE_FILE"
+            fi
+            success "Volume добавлен."
+        fi
+
+        # 5. Рестарт
+        info "Перезапуск контейнера..."
+        cd "$REMNA_DIR" && docker compose down && docker compose up -d
+        success "Контейнер перезапущен."
+    else
+        warn "docker-compose.yml не найден. Volume нужно будет добавить вручную."
+    fi
+
+    echo ""
+    printf "${GREEN}══════════════════════════════════════════${NC}\n"
+    printf "${GREEN}  СИСТЕМА ЛОГОВ ГОТОВА!${NC}\n"
+    printf "${GREEN}══════════════════════════════════════════${NC}\n"
+    echo ""
+    printf "Зайди в панель управления нодой и добавь в конфиг:\n"
+    printf "${YELLOW}"
+    echo '  "log": {'
+    echo '    "access": "/var/log/remnanode/access.log",'
+    echo '    "error": "/var/log/remnanode/error.log",'
+    echo '    "loglevel": "warning"'
+    echo '  },'
+    printf "${NC}\n"
+    printf "После сохранения в панели, логи полетят в $LOG_DIR\n"
+    press_enter
 }
 
 menu_monitoring() {
@@ -957,52 +1012,45 @@ menu_apps() {
 # ═══════════════════════════════════════════════════════════════
 
 do_test_ip_region() {
-    header "Проверка региона IP" "Тесты"
-    info "Запрос данных от ip-api.com..."
-    echo ""
-    curl -s http://ip-api.com/json/ | jq . 2>/dev/null || curl -s http://ip-api.com/json/
-    echo ""
+    header "Проверка IP Region" "Тесты"
+    bash <(wget -qO- https://ipregion.vrnt.xyz)
     press_enter
 }
 
 do_test_censor_geoblock() {
-    header "Censorcheck: Геоблокировка" "Тесты"
-    info "Запуск скрипта censorcheck..."
-    curl -sL https://raw.githubusercontent.com/censorcheck/censorcheck/main/censorcheck.sh | bash -s -- --geo
+    header "Censorcheck: Проверка геоблока" "Тесты"
+    bash <(wget -qO- https://github.com/vernette/censorcheck/raw/master/censorcheck.sh) --mode geoblock
     press_enter
 }
 
 do_test_censor_dpi() {
-    header "Censorcheck: Проверка DPI" "Тесты"
-    info "Запуск полной проверки..."
-    curl -sL https://raw.githubusercontent.com/censorcheck/censorcheck/main/censorcheck.sh | bash
+    header "Censorcheck: Проверка DPI (РФ)" "Тесты"
+    bash <(wget -qO- https://github.com/vernette/censorcheck/raw/master/censorcheck.sh) --mode dpi
     press_enter
 }
 
 do_test_ip_quality_place() {
-    header "IP.Check.Place" "Тесты"
-    info "Запуск скрипта от Check.Place..."
-    curl -L https://raw.githubusercontent.com/everStarry/IP.Check.Place/main/check.sh | bash
+    header "Проверка IP (IP.Check.Place)" "Тесты"
+    bash <(curl -Ls IP.Check.Place) -l en
     press_enter
 }
 
 do_test_ip_quality_check() {
-    header "IPQuality Index" "Тесты"
-    bash <(curl -Ls IP.Check.Place)
+    header "IP Quality (Check.Place)" "Тесты"
+    bash <(curl -Ls https://Check.Place) -EI
     press_enter
 }
 
 do_test_iperf_ru() {
-    header "RU iPerf3 Speedtest" "Тесты"
-    info "Тестирование скорости до российских серверов..."
-    curl -sL https://raw.githubusercontent.com/m-on-key/iperfall/main/iperfall.sh | bash
+    header "Тест скорости до RU iPerf3 серверов" "Тесты"
+    bash <(wget -qO- https://github.com/itdoginfo/russian-iperf3-servers/raw/main/speedtest.sh)
     press_enter
 }
 
 do_test_yabs() {
-    header "YABS (Yet Another Bench Script)" "Тесты"
-    info "Запуск полного бенчмарка (это может занять 5-10 минут)..."
-    curl -sL yabs.sh | bash
+    header "Yet Another Bench Script (YABS)" "Тесты"
+    info "Запуск YABS (только IPv4)..."
+    curl -sL yabs.sh | bash -s -- -4
     press_enter
 }
 

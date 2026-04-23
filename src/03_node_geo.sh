@@ -191,8 +191,13 @@ do_download_geo() {
 
             if grep -E -q '^[ \t]+volumes:' "$COMPOSE_FILE"; then
                 awk -v vol="      - \"${volume_mapping}\"" '/^[ \t]+volumes:/ && !done { print; print vol; done=1; next } 1' "$COMPOSE_FILE" > "${COMPOSE_FILE}.tmp" && mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE"
+            elif grep -q "SECRET_KEY" "$COMPOSE_FILE"; then
+                sed -i "/SECRET_KEY/a \\    volumes:\\n      - \"${volume_mapping}\"" "$COMPOSE_FILE"
             elif grep -q "image:" "$COMPOSE_FILE"; then
                 sed -i "/image:/a \\    volumes:\\n      - \"${volume_mapping}\"" "$COMPOSE_FILE"
+            else
+                warn "Не найдено место для автоматического добавления volume."
+                warn "Добавьте строку '- \"${volume_mapping}\"' в docker-compose.yml вручную."
             fi
 
             if grep -q "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
