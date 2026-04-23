@@ -4,10 +4,22 @@
 # VPN GUARD — Хелперы
 # ═══════════════════════════════════════════════════════════════
 
-VPNGUARD_REMOTE_URL="https://github.com/onelove999/Quick-Install/archive/refs/heads/main.tar.gz"
+VPNGUARD_GITHUB_REPO="onelove999/Quick-Install"
+VPNGUARD_GITHUB_REF="main"
 
 compose_vpnguard() {
-    docker compose -f "${VPNGUARD_DIR}/docker-compose.yml" "$@"
+    if command -v docker &>/dev/null && docker compose version &>/dev/null; then
+        (cd "$VPNGUARD_DIR" && docker compose "$@")
+        return $?
+    fi
+
+    if command -v docker-compose &>/dev/null; then
+        (cd "$VPNGUARD_DIR" && docker-compose "$@")
+        return $?
+    fi
+
+    error "Docker Compose не найден."
+    return 1
 }
 
 vpnguard_get_value() {
@@ -31,85 +43,91 @@ vpnguard_update_config_value() {
 }
 
 ensure_vpnguard_source_settings() {
-    if ! command -v git &>/dev/null; then
-        info "Установка git..."
-        apt-get update -qq && apt-get install -y git -qq
-    fi
-    return 0
+    mkdir -p "$VPNGUARD_DIR"
+    info "Источник VPN Guard: ${VPNGUARD_GITHUB_REPO}@${VPNGUARD_GITHUB_REF}"
 }
 
 download_vpnguard_source() {
-    local src_dir="${VPNGUARD_DIR}/src"
-    
-    info "Загрузка VPN Guard из облака (GitHub)..."
-    mkdir -p "$src_dir"
-    
-    # Скачиваем архив всего репозитория
-    if ! curl -L "$VPNGUARD_REMOTE_URL" -o "${VPNGUARD_DIR}/repo.tar.gz"; then
-        error "Не удалось связаться с GitHub."
+    local repo="${VPNGUARD_GITHUB_REPO}"
+    local ref="${VPNGUARD_GITHUB_REF}"
+    local archive_url="https://github.com/${repo}/archive/${ref}.tar.gz"
+    local tmp_dir archive_file root_dir
+
+    if [ -z "$repo" ]; then
+        error "GitHub репозиторий не задан."
         return 1
     fi
 
-    info "Извлечение модуля vpnguard..."
-    rm -rf "${src_dir:?}"/*
-    
-    # Распаковываем папку vpnguard, используя поиск по маске, чтобы не зависеть от имени корня (Quick-Install-main)
-    # Сначала находим точное имя папки в архиве
-    local folder_in_archive
-    folder_in_archive=$(tar -tf "${VPNGUARD_DIR}/repo.tar.gz" | grep -m1 "/vpnguard/$" | cut -d/ -f1-2)
+    tmp_dir="$(mktemp -d)"
+    archive_file="${tmp_dir}/vpnguard.tar.gz"
 
-    if [ -z "$folder_in_archive" ]; then
-        # Если не нашли по /vpnguard/$, пробуем просто vpnguard
-        folder_in_archive=$(tar -tf "${VPNGUARD_DIR}/repo.tar.gz" | grep -m1 "vpnguard/" | cut -d/ -f1-2)
-    fi
-
-    if [ -n "$folder_in_archive" ]; then
-        tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "$folder_in_archive"
-    else
-        # Запасной вариант, если не удалось определить папку заранее
-        tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "*/vpnguard" 2>/dev/null
-    fi
-
-    # Проверяем, что в папку хоть что-то попало
-    if [ -n "$(ls -A "$src_dir" 2>/dev/null)" ]; then
-        rm "${VPNGUARD_DIR}/repo.tar.gz"
-        success "VPN Guard успешно обновлен напрямую."
-        return 0
-    else
-        error "Не удалось извлечь файлы. Проверьте структуру репозитория."
-        rm "${VPNGUARD_DIR}/repo.tar.gz"
+    info "Скачиваю исходники VPN Guard из ${repo}@${ref}..."
+    if ! curl -fsSL "$archive_url" -o "$archive_file"; then
+        rm -rf "$tmp_dir"
+        error "Не удалось скачать архив ${archive_url}"
         return 1
     fi
+
+    if ! tar -xzf "$archive_file" -C "$tmp_dir"; then
+        rm -rf "$tmp_dir"
+        error "Не удалось распаковать архив."
+        return 1
+    fi
+
+    root_dir="$(find "$tmp_dir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+    if [ ! -d "${root_dir}/vpnguard" ]; then
+        rm -rf "$tmp_dir"
+        error "В архиве не найден каталог vpnguard/."
+        return 1
+    fi
+
+    mkdir -p "${VPNGUARD_DIR}/src"
+    rm -rf "${VPNGUARD_DIR}/src/vpnguard"
+    cp -a "${root_dir}/vpnguard" "${VPNGUARD_DIR}/src/vpnguard"
+    rm -rf "$tmp_dir"
+
+    success "Исходники VPN Guard обновлены."
 }
 
 generate_vpnguard_config() {
+    mkdir -p "$VPNGUARD_DIR" "${VPNGUARD_DIR}/reports"
+    touch "${VPNGUARD_DIR}/guard_alerts.log"
+
+    local default_node_name
+    default_node_name="$(hostname)"
+
     if [ -f "$VPNGUARD_CONFIG" ]; then
-        warn "Конфиг уже существует: $VPNGUARD_CONFIG"
-        read -rp "$(printf "${YELLOW}Перезаписать? [y/N]: ${NC}")" confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
-            info "Используем существующий конфиг."
-            return 0
-        fi
+        info "Конфиг VPN Guard уже существует: $VPNGUARD_CONFIG"
+        return 0
     fi
 
-    read -rp "$(printf "${CYAN}Имя ноды: ${NC}")" node_name
-    read -rp "$(printf "${CYAN}Telegram Bot Token: ${NC}")" bot_token
-    read -rp "$(printf "${CYAN}Telegram Chat ID: ${NC}")" chat_id
+    read -rp "$(printf "${CYAN}Имя ноды [${default_node_name}]: ${NC}")" node_name
+    node_name="${node_name:-$default_node_name}"
+    read -rp "$(printf "${CYAN}Telegram Bot Token (можно оставить пустым): ${NC}")" tg_bot_token
+    read -rp "$(printf "${CYAN}Telegram Chat ID (можно оставить пустым): ${NC}")" tg_chat_id
+    read -rp "$(printf "${CYAN}Gemini 2.5 API Token (AI анализ, можно оставить пустым): ${NC}")" tg_gemini_token
 
-    if [ -z "$node_name" ] || [ -z "$bot_token" ] || [ -z "$chat_id" ]; then
-        error "Все поля обязательны!"
-        return 1
+    local ai_enabled="false"
+    if [ -n "$tg_gemini_token" ]; then
+        ai_enabled="true"
     fi
 
-    mkdir -p "$(dirname "$VPNGUARD_CONFIG")"
     cat > "$VPNGUARD_CONFIG" <<EOF
 node_name: "${node_name}"
 log_file: "/var/log/remnanode/access.log"
+alert_log: "/app/guard_alerts.log"
+
 telegram:
-  bot_token: "${bot_token}"
-  chat_id: "${chat_id}"
+  bot_token: "${tg_bot_token}"
+  chat_id: "${tg_chat_id}"
+
+ai:
+  enabled: ${ai_enabled}
+  gemini_token: "${tg_gemini_token}"
+
 scoring:
   threshold: 800
+  window_seconds: 60
   alert_cooldown: 120
 EOF
     success "Конфиг создан: $VPNGUARD_CONFIG"
@@ -122,13 +140,14 @@ generate_vpnguard_compose() {
     cat > "$compose_file" <<EOF
 services:
   vpnguard:
-    build: ./src
+    build: ./src/vpnguard
     container_name: vpnguard
     restart: unless-stopped
     volumes:
       - ./config:/app/config:ro
       - /var/log/remnanode:/var/log/remnanode:ro
       - ./reports:/app/reports
+      - ./guard_alerts.log:/app/guard_alerts.log
 EOF
     success "docker-compose.yml создан."
 }
