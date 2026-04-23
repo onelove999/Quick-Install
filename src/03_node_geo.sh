@@ -293,10 +293,9 @@ do_show_access_logs() {
     fi
     info "Выход: Ctrl+C"
     echo ""
-    # Игнорируем прерывание для основного скрипта
+    # Родитель игнорирует INT (не вылетит), подшелл сбрасывает (tail получит Ctrl+C)
     trap '' INT
-    tail -f "$log_file"
-    # Возвращаем стандартную обработку
+    (trap - INT; tail -f "$log_file")
     trap - INT
 }
 
