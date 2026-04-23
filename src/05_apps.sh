@@ -4,7 +4,7 @@
 # VPN GUARD — Хелперы
 # ═══════════════════════════════════════════════════════════════
 
-VPNGUARD_REPO_URL="https://github.com/onelove999/vpnguard.git"
+VPNGUARD_SRC_URL="https://github.com/onelove999/vpnguard/archive/refs/heads/main.tar.gz"
 
 compose_vpnguard() {
     docker compose -f "${VPNGUARD_DIR}/docker-compose.yml" "$@"
@@ -40,18 +40,27 @@ ensure_vpnguard_source_settings() {
 
 download_vpnguard_source() {
     local src_dir="${VPNGUARD_DIR}/src"
-    if [ -d "${src_dir}/.git" ]; then
-        info "Обновление исходников VPN Guard..."
-        cd "$src_dir" && git pull
-    else
-        if [ -d "$src_dir" ]; then
-            warn "Папка $src_dir существует, но не является репозиторием. Очистка..."
-            rm -rf "$src_dir"
-        fi
-        info "Клонирование VPN Guard..."
-        mkdir -p "$VPNGUARD_DIR"
-        git clone "$VPNGUARD_REPO_URL" "$src_dir"
+    
+    info "Загрузка VPN Guard (архив)..."
+    mkdir -p "$src_dir"
+    
+    # Скачиваем во временный файл
+    if ! curl -L "$VPNGUARD_SRC_URL" -o "${VPNGUARD_DIR}/vpnguard.tar.gz"; then
+        error "Не удалось загрузить архив VPN Guard."
+        return 1
     fi
+
+    # Распаковываем с очисткой папки
+    info "Распаковка исходников..."
+    rm -rf "${src_dir:?}"/*
+    if ! tar -xzf "${VPNGUARD_DIR}/vpnguard.tar.gz" -C "$src_dir" --strip-components=1; then
+        error "Ошибка при распаковке архива."
+        return 1
+    fi
+
+    rm "${VPNGUARD_DIR}/vpnguard.tar.gz"
+    success "VPN Guard успешно загружен."
+    return 0
 }
 
 generate_vpnguard_config() {
