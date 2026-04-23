@@ -112,6 +112,7 @@ generate_vpnguard_config() {
         ai_enabled="true"
     fi
 
+    mkdir -p "$(dirname "$VPNGUARD_CONFIG")"
     cat > "$VPNGUARD_CONFIG" <<EOF
 node_name: "${node_name}"
 log_file: "/var/log/remnanode/access.log"
@@ -129,6 +130,95 @@ scoring:
   threshold: 800
   window_seconds: 60
   alert_cooldown: 120
+
+whitelist:
+  domains:
+    - google
+    - youtube
+    - googlevideo
+    - gmail
+    - gstatic
+    - doubleclick
+    - android
+    - facebook
+    - fbcdn
+    - instagram
+    - whatsapp
+    - meta
+    - cdninstagram
+    - apple
+    - icloud
+    - itunes
+    - iphone
+    - push.apple.com
+    - tiktok
+    - tiktokcdn
+    - tiktokv
+    - netflix
+    - nflxvideo
+    - microsoft
+    - windowsupdate
+    - azure
+    - office
+    - amazon
+    - aws
+    - telegram
+    - spotify
+    - cloudflare
+    - yandex
+    - ya.ru
+    - kinopoisk
+    - vk.com
+    - ok.ru
+    - vkuser
+    - userapi
+    - mail.ru
+    - steam
+    - valve
+    - epicgames
+    - discord
+    - avito
+    - ozon
+    - wildberries
+    - wb.ru
+    - openai
+    - chatgpt
+    - anthropic
+    - claude
+    - gemini
+    - deepseek
+    - github
+    - githubusercontent
+    - copilot
+  trusted_ip_prefixes:
+    - "149.154."
+    - "91.108."
+    - "5.28."
+    - "91.105."
+    - "95.161."
+    - "2001:67c:"
+    - "2001:b28:"
+    - "173.194."
+    - "74.125."
+    - "142.250."
+    - "142.251."
+    - "162.159."
+    - "199.103."
+    - "35.214."
+    - "104.16."
+    - "104.17."
+    - "104.18."
+    - "104.19."
+    - "104.20."
+    - "104.21."
+    - "172.64."
+    - "172.67."
+    - "199.232."
+    - "92.223."
+    - "185.106."
+    - "87.240."
+    - "95.163."
+    - "93.186."
 EOF
     success "Конфиг создан: $VPNGUARD_CONFIG"
     return 0
