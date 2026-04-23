@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 do_install_node() {
-    header "Установка ноды"
+    header "Установка ноды" "Нода"
 
     # 0. Проверка запущенного контейнера
     if command -v docker &>/dev/null && docker ps --format '{{.Names}}' | grep -q "^remnanode$"; then
@@ -31,7 +31,7 @@ do_install_node() {
     if [ -f "$COMPOSE_FILE" ]; then
         warn "Файл $COMPOSE_FILE уже существует."
         read -rp "$(printf "${YELLOW}Перезаписать? [y/N]: ${NC}")" overwrite
-        if [ "$overwrite" != "y" ] && [ "$overwrite" != "Y" ]; then
+        if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
             info "Пропускаем создание docker-compose.yml."
             press_enter
             return
@@ -65,7 +65,7 @@ do_start_node() {
 
     success "Контейнер запущен. Показываю логи (Ctrl+C для выхода)..."
     echo ""
-    docker compose logs -f -t || true
+    cd "$REMNA_DIR" && docker compose logs -f -t || true
 }
 
 do_update_node() {
@@ -85,7 +85,7 @@ do_update_node() {
     
     success "Обновление завершено. Показываю логи (Ctrl+C для выхода)..."
     echo ""
-    docker compose logs -f -t || true
+    cd "$REMNA_DIR" && docker compose logs -f -t || true
 }
 
 do_show_docker_logs() {

@@ -36,8 +36,8 @@ fi
 
 # Клонируем или обновляем репо
 if [ -d "$INSTALL_DIR" ]; then
-    info "Обновление файлов в $INSTALL_DIR..."
-    cd "$INSTALL_DIR" && git remote update >/dev/null 2>&1 && git pull >/dev/null 2>&1
+    info "Обновление файлов в $INSTALL_DIR (принудительно)..."
+    cd "$INSTALL_DIR" && git fetch --all >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1
 else
     info "Клонирование репозитория в $INSTALL_DIR..."
     git clone -q "$REPO_URL" "$INSTALL_DIR"

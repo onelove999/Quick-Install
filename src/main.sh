@@ -12,16 +12,16 @@ source "$(dirname "${BASH_SOURCE[0]}")/05_apps.sh"
 
 do_self_update() {
     header "Обновление утилиты QI" "Обновление"
-    info "Загрузка последней версии с GitHub..."
-    if cd /opt/quick-install && git pull; then
-        success "Скрипт успешно обновлён!"
+    info "Принудительная синхронизация с GitHub..."
+    if cd /opt/quick-install && git fetch --all && git reset --hard origin/main; then
+        success "Скрипт успешно синхронизирован с GitHub!"
         read -rp "$(printf "${YELLOW}Перезапустить меню сейчас? [y/N]: ${NC}")" restart_confirm
         if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
             info "Перезапуск..."
             exec qi
         fi
     else
-        error "Ошибка при обновлении. Проверьте подключение."
+        error "Ошибка при обновлении. Проверьте соединение или права доступа."
     fi
     press_enter
 }

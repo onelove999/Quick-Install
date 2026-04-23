@@ -241,14 +241,14 @@ menu_ufw() {
         printf "${BOLD}  4)${NC} Выключить UFW\n"
         echo ""
         printf "${BLUE}─── Пинги (ICMP) ────────────────────────────────────${NC}\n"
-        printf "${BOLD}  9)${NC} Запретить ответы на пинг\n"
-        printf "${BOLD} 10)${NC} Разрешить ответы на пинг\n"
+        printf "${BOLD}  5)${NC} Запретить ответы на пинг\n"
+        printf "${BOLD}  6)${NC} Разрешить ответы на пинг\n"
         echo ""
         printf "${BLUE}─── Управление портами ──────────────────────────────${NC}\n"
-        printf "${BOLD}  5)${NC} Открыть порт (TCP/UDP)\n"
-        printf "${BOLD}  6)${NC} Открыть порт для IP\n"
-        printf "${BOLD}  7)${NC} Закрыть порт\n"
-        printf "${BOLD}  8)${NC} Удалить правило по номеру\n"
+        printf "${BOLD}  7)${NC} Открыть порт (TCP/UDP)\n"
+        printf "${BOLD}  8)${NC} Открыть порт для IP\n"
+        printf "${BOLD}  9)${NC} Закрыть порт\n"
+        printf "${BOLD} 10)${NC} Удалить правило по номеру\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -259,12 +259,12 @@ menu_ufw() {
             2) ufw_enable_basic ;;
             3) ufw_enable_secure ;;
             4) ufw_disable ;;
-            5) ufw_open_port ;;
-            6) ufw_open_port_ip ;;
-            7) ufw_close_port ;;
-            8) ufw_delete_rule ;;
-            9) ufw_disable_ping ;;
-            10) ufw_enable_ping ;;
+            5) ufw_disable_ping ;;
+            6) ufw_enable_ping ;;
+            7) ufw_open_port ;;
+            8) ufw_open_port_ip ;;
+            9) ufw_close_port ;;
+            10) ufw_delete_rule ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac

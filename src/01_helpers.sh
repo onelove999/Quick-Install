@@ -76,13 +76,16 @@ measure_time() {
 
 show_system_info() {
     local os=$(grep PRETTY_NAME /etc/os-release | cut -d'"' -f2)
-    local ip=$(curl -s4 ifconfig.me || echo "N/A")
+    # Получаем IP локально из системы (быстрее и надежнее чем curl)
+    if [ -z "${_CACHED_IP:-}" ]; then
+        _CACHED_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || hostname -I | awk '{print $1}')
+    fi
     local ram_total=$(free -h | awk '/Mem:/ {print $2}')
     local ram_used=$(free -h | awk '/Mem:/ {print $3}')
     local load=$(uptime | awk -F'load average:' '{print $2}' | xargs)
     
     printf "${BLUE}─── Информация о сервере ───────────────────────────${NC}\n"
-    printf "  OS:   %-20s | IP:   ${CYAN}%s${NC}\n" "$os" "$ip"
+    printf "  OS:   %-20s | IP:   ${CYAN}%s${NC}\n" "$os" "$_CACHED_IP"
     printf "  RAM:  %-20s | Load: %s\n" "$ram_used / $ram_total" "$load"
     printf "  BBR:  %-20s | IPv6: %s\n" "$(get_bbr_status)" "$(get_ipv6_status)"
     printf "${BLUE}─────────────────────────────────────────────────────${NC}\n"
@@ -91,5 +94,12 @@ show_system_info() {
 press_enter() {
     echo ""
     read -rp "$(printf "${YELLOW}Нажмите Enter для продолжения...${NC}")" _
+}
+
+require_root() {
+    if [ "$(id -u)" -ne 0 ]; then
+        error "Требуются права root. Запустите: sudo qi"
+        exit 1
+    fi
 }
 
