@@ -322,7 +322,7 @@ do_logs_vpnguard() {
     header "Логи VPN Guard" "Мониторинг > VPN Guard"
     info "Выход: Ctrl+C"
     echo ""
-    compose_vpnguard logs --tail=200 -f
+    (trap - INT; compose_vpnguard logs --tail=200 -f)
 }
 
 do_interactive_vpnguard() {

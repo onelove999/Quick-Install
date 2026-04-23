@@ -293,8 +293,11 @@ do_show_access_logs() {
     fi
     info "Выход: Ctrl+C"
     echo ""
-    # Игнорируем прерывание в основном скрипте, чтобы Ctrl+C убивал только tail
-    (trap - INT; tail -f "$log_file")
+    # Игнорируем прерывание для основного скрипта
+    trap '' INT
+    tail -f "$log_file"
+    # Возвращаем стандартную обработку
+    trap - INT
 }
 
 menu_geo() {
