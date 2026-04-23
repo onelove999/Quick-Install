@@ -4,7 +4,7 @@
 # VPN GUARD — Хелперы
 # ═══════════════════════════════════════════════════════════════
 
-VPNGUARD_SRC_URL="https://github.com/onelove999/vpnguard/archive/refs/heads/main.tar.gz"
+VPNGUARD_REMOTE_URL="https://github.com/onelove999/Quick-Install/archive/refs/heads/main.tar.gz"
 
 compose_vpnguard() {
     docker compose -f "${VPNGUARD_DIR}/docker-compose.yml" "$@"
@@ -41,26 +41,34 @@ ensure_vpnguard_source_settings() {
 download_vpnguard_source() {
     local src_dir="${VPNGUARD_DIR}/src"
     
-    info "Загрузка VPN Guard (архив)..."
+    info "Загрузка VPN Guard из облака (GitHub)..."
     mkdir -p "$src_dir"
     
-    # Скачиваем во временный файл
-    if ! curl -L "$VPNGUARD_SRC_URL" -o "${VPNGUARD_DIR}/vpnguard.tar.gz"; then
-        error "Не удалось загрузить архив VPN Guard."
+    # Скачиваем архив всего репозитория
+    if ! curl -L "$VPNGUARD_REMOTE_URL" -o "${VPNGUARD_DIR}/repo.tar.gz"; then
+        error "Не удалось связаться с GitHub."
         return 1
     fi
 
-    # Распаковываем с очисткой папки
-    info "Распаковка исходников..."
+    info "Извлечение модуля vpnguard..."
     rm -rf "${src_dir:?}"/*
-    if ! tar -xzf "${VPNGUARD_DIR}/vpnguard.tar.gz" -C "$src_dir" --strip-components=1; then
-        error "Ошибка при распаковке архива."
-        return 1
+    
+    # Распаковываем ТОЛЬКО папку vpnguard из архива всего репозитория
+    # --strip-components=2 убирает "Quick-Install-main/" и "vpnguard/" из путей
+    if ! tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "Quick-Install-main/vpnguard"; then
+        # На случай если ветка не main, пробуем более универсальный поиск пути (редко нужно, но для надежности)
+        tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "*/vpnguard" 2>/dev/null
     fi
 
-    rm "${VPNGUARD_DIR}/vpnguard.tar.gz"
-    success "VPN Guard успешно загружен."
-    return 0
+    if [ -f "${src_dir}/main.py" ] || [ -d "${src_dir}/monitoring" ]; then
+        rm "${VPNGUARD_DIR}/repo.tar.gz"
+        success "VPN Guard успешно обновлен напрямую."
+        return 0
+    else
+        error "Файлы VPN Guard не найдены в архиве."
+        rm "${VPNGUARD_DIR}/repo.tar.gz"
+        return 1
+    fi
 }
 
 generate_vpnguard_config() {
