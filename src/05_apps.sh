@@ -44,6 +44,10 @@ download_vpnguard_source() {
         info "Обновление исходников VPN Guard..."
         cd "$src_dir" && git pull
     else
+        if [ -d "$src_dir" ]; then
+            warn "Папка $src_dir существует, но не является репозиторием. Очистка..."
+            rm -rf "$src_dir"
+        fi
         info "Клонирование VPN Guard..."
         mkdir -p "$VPNGUARD_DIR"
         git clone "$VPNGUARD_REPO_URL" "$src_dir"
