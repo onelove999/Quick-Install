@@ -53,19 +53,30 @@ download_vpnguard_source() {
     info "Извлечение модуля vpnguard..."
     rm -rf "${src_dir:?}"/*
     
-    # Распаковываем ТОЛЬКО папку vpnguard из архива всего репозитория
-    # --strip-components=2 убирает "Quick-Install-main/" и "vpnguard/" из путей
-    if ! tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "Quick-Install-main/vpnguard"; then
-        # На случай если ветка не main, пробуем более универсальный поиск пути (редко нужно, но для надежности)
+    # Распаковываем папку vpnguard, используя поиск по маске, чтобы не зависеть от имени корня (Quick-Install-main)
+    # Сначала находим точное имя папки в архиве
+    local folder_in_archive
+    folder_in_archive=$(tar -tf "${VPNGUARD_DIR}/repo.tar.gz" | grep -m1 "/vpnguard/$" | cut -d/ -f1-2)
+
+    if [ -z "$folder_in_archive" ]; then
+        # Если не нашли по /vpnguard/$, пробуем просто vpnguard
+        folder_in_archive=$(tar -tf "${VPNGUARD_DIR}/repo.tar.gz" | grep -m1 "vpnguard/" | cut -d/ -f1-2)
+    fi
+
+    if [ -n "$folder_in_archive" ]; then
+        tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "$folder_in_archive"
+    else
+        # Запасной вариант, если не удалось определить папку заранее
         tar -xzf "${VPNGUARD_DIR}/repo.tar.gz" -C "$src_dir" --strip-components=2 "*/vpnguard" 2>/dev/null
     fi
 
-    if [ -f "${src_dir}/main.py" ] || [ -d "${src_dir}/monitoring" ]; then
+    # Проверяем, что в папку хоть что-то попало
+    if [ -n "$(ls -A "$src_dir" 2>/dev/null)" ]; then
         rm "${VPNGUARD_DIR}/repo.tar.gz"
         success "VPN Guard успешно обновлен напрямую."
         return 0
     else
-        error "Файлы VPN Guard не найдены в архиве."
+        error "Не удалось извлечь файлы. Проверьте структуру репозитория."
         rm "${VPNGUARD_DIR}/repo.tar.gz"
         return 1
     fi
