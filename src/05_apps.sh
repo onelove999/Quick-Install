@@ -144,7 +144,7 @@ services:
     container_name: vpnguard
     restart: unless-stopped
     volumes:
-      - ./config:/app/config:ro
+      - ./config/config.yaml:/app/vpnguard.yaml:ro
       - /var/log/remnanode:/var/log/remnanode:ro
       - ./reports:/app/reports
       - ./guard_alerts.log:/app/guard_alerts.log
