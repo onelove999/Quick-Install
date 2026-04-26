@@ -304,56 +304,74 @@ func summarizeUserActivity(emailDomains map[string]map[string]*domainStat) []str
 		return []string{"- no data"}
 	}
 
-	const (
-		minRPM      = 10.0 // elevated+
-		minRequests = 500
-	)
-
 	type domainRow struct {
-		Domain string
-		Count  int
-		RPM    float64
+		Domain   string
+		Count    int
+		RPM      float64
+		IsBurst  bool
 	}
 
 	type userRow struct {
-		Email   string
-		Total   int
-		Domains []domainRow
+		Email      string
+		Total      int
+		OverallRPM float64
+		Domains    []domainRow
 	}
 
 	users := make([]userRow, 0)
 	for email, domains := range emailDomains {
 		total := 0
-		hasElevated := false
+		var earliest, latest time.Time
+
 		dRows := make([]domainRow, 0, len(domains))
 		for domain, ds := range domains {
 			total += ds.Count
+
+			// Track overall user time span
+			if earliest.IsZero() || ds.First.Before(earliest) {
+				earliest = ds.First
+			}
+			if latest.IsZero() || ds.Last.After(latest) {
+				latest = ds.Last
+			}
+
 			rpm := 0.0
+			isBurst := false
 			duration := ds.Last.Sub(ds.First)
 			if duration > 0 {
 				minutes := duration.Minutes()
 				if minutes > 0 {
 					rpm = math.Round(float64(ds.Count)/minutes*10) / 10
 				}
+			} else if ds.Count > 1 {
+				isBurst = true
 			}
-			if rpm > minRPM {
-				hasElevated = true
+
+			if rpm >= 1.0 || isBurst {
+				dRows = append(dRows, domainRow{Domain: domain, Count: ds.Count, RPM: rpm, IsBurst: isBurst})
 			}
-			dRows = append(dRows, domainRow{Domain: domain, Count: ds.Count, RPM: rpm})
 		}
 
-		if !hasElevated && total < minRequests {
+		// Calculate overall user RPM
+		overallRPM := 0.0
+		totalDuration := latest.Sub(earliest)
+		if totalDuration > 0 {
+			minutes := totalDuration.Minutes()
+			if minutes > 0 {
+				overallRPM = math.Round(float64(total)/minutes*10) / 10
+			}
+		}
+
+		// Filter: only users with overall >= 1 req/min
+		if overallRPM < 1.0 {
 			continue
 		}
 
 		sort.Slice(dRows, func(i, j int) bool {
 			return dRows[i].Count > dRows[j].Count
 		})
-		if len(dRows) > 5 {
-			dRows = dRows[:5]
-		}
 
-		users = append(users, userRow{Email: email, Total: total, Domains: dRows})
+		users = append(users, userRow{Email: email, Total: total, OverallRPM: overallRPM, Domains: dRows})
 	}
 
 	if len(users) == 0 {
@@ -361,27 +379,29 @@ func summarizeUserActivity(emailDomains map[string]map[string]*domainStat) []str
 	}
 
 	sort.Slice(users, func(i, j int) bool {
-		return users[i].Total > users[j].Total
+		return users[i].OverallRPM > users[j].OverallRPM
 	})
 
 	out := make([]string, 0)
 	for _, u := range users {
-		out = append(out, fmt.Sprintf("\n  📧 email: %s — %d requests total", u.Email, u.Total))
+		out = append(out, fmt.Sprintf("\n  📧 email: %s — %d requests, ~%.1f req/min avg", u.Email, u.Total, u.OverallRPM))
 		for _, d := range u.Domains {
-			label := "normal"
-			switch {
-			case d.RPM > 100:
-				label = "⚠️ anomaly"
-			case d.RPM > 30:
-				label = "high"
-			case d.RPM > 10:
-				label = "elevated"
+			detail := ""
+			if d.IsBurst {
+				detail = " [burst]"
+			} else if d.RPM >= 1.0 {
+				label := ""
+				switch {
+				case d.RPM > 100:
+					label = " ⚠️ anomaly"
+				case d.RPM > 30:
+					label = " high"
+				case d.RPM > 10:
+					label = " elevated"
+				}
+				detail = fmt.Sprintf(", ~%.1f req/min%s", d.RPM, label)
 			}
-			rpmStr := ""
-			if d.RPM > 0 {
-				rpmStr = fmt.Sprintf(", ~%.1f req/min", d.RPM)
-			}
-			out = append(out, fmt.Sprintf("    %s: %d hits%s [%s]", d.Domain, d.Count, rpmStr, label))
+			out = append(out, fmt.Sprintf("    %s: %d hits%s", d.Domain, d.Count, detail))
 		}
 	}
 	return out
