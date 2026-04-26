@@ -31,23 +31,25 @@ type TelegramConfig struct {
 }
 
 type ScoringConfig struct {
-	Threshold     int         `yaml:"threshold"`
-	WindowSeconds int         `yaml:"window_seconds"`
-	Cooldown      int         `yaml:"alert_cooldown"`
-	Points        Points      `yaml:"points"`
-	SpamPorts     []string    `yaml:"spam_ports"`
-	SuspiciousPorts []string  `yaml:"suspicious_ports"`
-	LocalNets     []string    `yaml:"local_nets"`
+	Threshold       float64    `yaml:"threshold"`
+	WindowSeconds   int        `yaml:"window_seconds"`
+	Cooldown        int        `yaml:"alert_cooldown"`
+	FloodThreshold  int        `yaml:"flood_threshold"`
+	Points          Points     `yaml:"points"`
+	SpamPorts       []string   `yaml:"spam_ports"`
+	SuspiciousPorts []string   `yaml:"suspicious_ports"`
+	LocalNets       []string   `yaml:"local_nets"`
 }
 
 type Points struct {
-	Domain         int `yaml:"domain"`
-	IP             int `yaml:"ip"`
-	Whitelist      int `yaml:"whitelist"`
-	Spam           int `yaml:"spam"`
-	LocalNet       int `yaml:"local_net"`
-	SSH            int `yaml:"ssh"`
-	SuspiciousPort int `yaml:"suspicious_port"`
+	Domain         float64 `yaml:"domain"`
+	IP             float64 `yaml:"ip"`
+	Whitelist      float64 `yaml:"whitelist"`
+	Spam           float64 `yaml:"spam"`
+	LocalNet       float64 `yaml:"local_net"`
+	SSH            float64 `yaml:"ssh"`
+	SuspiciousPort float64 `yaml:"suspicious_port"`
+	Flood          float64 `yaml:"flood"`
 }
 
 type WhitelistConfig struct {
@@ -106,10 +108,16 @@ func applyDefaults(cfg *Config) {
 		cfg.Scoring.Points.LocalNet = 10
 	}
 	if cfg.Scoring.Points.SSH == 0 {
-		cfg.Scoring.Points.SSH = 25
+		cfg.Scoring.Points.SSH = 15
 	}
 	if cfg.Scoring.Points.SuspiciousPort == 0 {
 		cfg.Scoring.Points.SuspiciousPort = 30
+	}
+	if cfg.Scoring.Points.Flood == 0 {
+		cfg.Scoring.Points.Flood = 10
+	}
+	if cfg.Scoring.FloodThreshold == 0 {
+		cfg.Scoring.FloodThreshold = 200
 	}
 
 	if len(cfg.Scoring.SpamPorts) == 0 {
@@ -130,7 +138,7 @@ func applyDefaults(cfg *Config) {
 			"netflix", "nflxvideo",
 			"microsoft", "windowsupdate", "azure", "office",
 			"amazon", "aws",
-			"telegram", "spotify", "cloudflare",
+			"telegram", "spotify",
 			"yandex", "ya.ru", "kinopoisk", "vk.com", "ok.ru", "vkuser", "userapi", "mail.ru",
 			"steam", "valve", "epicgames", "discord",
 			"avito", "ozon", "wildberries", "wb.ru",

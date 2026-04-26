@@ -39,7 +39,7 @@ func (t *Telegram) SendAlert(nodeName string, alert *daemon.Alert) error {
 	}
 
 	message := fmt.Sprintf(
-		"🚨 <b>VPN Guard</b> [%s]\n\nIP: <code>%s</code>\nEmail: <code>%s</code>\nTarget: <code>%s:%s</code>\nScore: <b>%d</b> (limit %d)%s\n\n<b>Breakdown:</b>\n%s",
+		"🚨 <b>VPN Guard</b> [%s]\n\nIP: <code>%s</code>\nEmail: <code>%s</code>\nTarget: <code>%s:%s</code>\nScore: <b>%g</b> (limit %g)%s\n\n<b>Breakdown:</b>\n%s",
 		nodeName,
 		alert.IP,
 		emptyFallback(alert.Email, "unknown"),

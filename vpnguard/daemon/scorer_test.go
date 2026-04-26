@@ -41,7 +41,7 @@ func TestScorerTriggersThreshold(t *testing.T) {
 	if second == nil {
 		t.Fatalf("expected alert after threshold reached")
 	}
-	if second.Score != 100 {
-		t.Fatalf("unexpected score: %d", second.Score)
+	if second.Score != 100.0 {
+		t.Fatalf("unexpected score: %g", second.Score)
 	}
 }

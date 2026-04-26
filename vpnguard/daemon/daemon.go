@@ -150,7 +150,11 @@ func (m *Monitor) readNewLines(file *os.File, offset *int64) error {
 		if len(lineBytes) > 0 && lineBytes[len(lineBytes)-1] == '\n' {
 			*offset += int64(len(lineBytes))
 			line := strings.TrimRight(string(lineBytes), "\r\n")
-			
+
+			if strings.Contains(line, "BLOCK") {
+				continue
+			}
+
 			entry, parseErr := ParseLine(line)
 			if parseErr == nil && entry.SourceIP != "" && entry.SourceIP != "127.0.0.1" && entry.SourceIP != "::1" {
 				if alert := m.scorer.Add(entry); alert != nil {
@@ -192,7 +196,7 @@ func (m *Monitor) recordAlert(alert *Alert) error {
 }
 
 func (m *Monitor) processAlertAsync(alert *Alert, ip string) {
-	m.logger.Printf("ALERT triggered for %s (Score: %d). Starting processing...", ip, alert.Score)
+	m.logger.Printf("ALERT triggered for %s (Score: %g). Starting processing...", ip, alert.Score)
 	
 	if m.ai != nil {
 		m.logger.Printf("[%s] waiting 30s to collect more context for AI...", ip)

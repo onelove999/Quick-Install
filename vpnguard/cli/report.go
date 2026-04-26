@@ -13,9 +13,9 @@ import (
 )
 
 type offenderScore struct {
-	Email string
 	IP    string
-	Score int
+	Email string
+	Score float64
 }
 
 func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
@@ -31,7 +31,7 @@ func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
 	blocked := map[string]int{}
 	emailIPs := map[string]map[string]struct{}{}
 	suspiciousPorts := map[string]int{}
-	offenders := map[string]int{}
+	offenders := map[string]float64{}
 	scorer := daemon.NewScorer(cfg)
 
 	for _, file := range files {
@@ -229,7 +229,7 @@ func summarizeEmailIPs(emailIPs map[string]map[string]struct{}) []string {
 	return out
 }
 
-func topOffenders(items map[string]int, limit int) []string {
+func topOffenders(items map[string]float64, limit int) []string {
 	if len(items) == 0 {
 		return []string{"- no alerts triggered in historical replay"}
 	}
@@ -255,7 +255,7 @@ func topOffenders(items map[string]int, limit int) []string {
 	}
 	out := make([]string, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, fmt.Sprintf("- %s (%s): %d", row.IP, empty(row.Email, "unknown"), row.Score))
+		out = append(out, fmt.Sprintf("- %s (%s): %g", row.IP, empty(row.Email, "unknown"), row.Score))
 	}
 	return out
 }

@@ -12,7 +12,7 @@ import (
 
 type ScoreEvent struct {
 	Time     time.Time
-	Points   int
+	Points   float64
 	Category string
 	Raw      string
 }
@@ -29,8 +29,8 @@ type Alert struct {
 	Email       string
 	Host        string
 	Port        string
-	Score       int
-	Threshold   int
+	Score       float64
+	Threshold   float64
 	Breakdown   string
 	RecentLines []string
 	AIResult    string
@@ -57,7 +57,7 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 
 	host, port := SplitDestination(entry.Destination)
 	category, points := s.classify(host, port)
-	if points <= 0 {
+	if points <= 0.0 {
 		return nil
 	}
 
@@ -80,10 +80,17 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 	})
 	s.pruneEvents(state, now)
 
-	score := 0
+	// Flood detection: count total events in window
+	totalEvents := len(state.Events)
+	floodExtra := 0.0
+	if s.cfg.Scoring.FloodThreshold > 0 && totalEvents > s.cfg.Scoring.FloodThreshold {
+		floodExtra = float64(totalEvents-s.cfg.Scoring.FloodThreshold) * s.cfg.Scoring.Points.Flood
+	}
+
+	score := 0.0
 	breakdown := map[string]struct {
 		count int
-		total int
+		total float64
 	}{}
 	for _, event := range state.Events {
 		score += event.Points
@@ -91,6 +98,15 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 		item.count++
 		item.total += event.Points
 		breakdown[event.Category] = item
+	}
+
+	// Add flood penalty
+	if floodExtra > 0 {
+		score += floodExtra
+		item := breakdown["flood"]
+		item.count = totalEvents - s.cfg.Scoring.FloodThreshold
+		item.total = floodExtra
+		breakdown["flood"] = item
 	}
 
 	if score < s.cfg.Scoring.Threshold {
@@ -156,9 +172,9 @@ func (s *Scorer) pruneEvents(state *IPState, now time.Time) {
 	state.Events = filtered
 }
 
-func (s *Scorer) classify(host, port string) (string, int) {
+func (s *Scorer) classify(host, port string) (string, float64) {
 	if port == "53" || port == "853" {
-		return "dns", 0
+		return "dns", 0.0
 	}
 	if s.isSpamPort(port) {
 		return "spam", s.cfg.Scoring.Points.Spam
@@ -227,12 +243,12 @@ func (s *Scorer) isWhitelisted(host string) bool {
 
 func formatBreakdown(breakdown map[string]struct {
 	count int
-	total int
+	total float64
 }) string {
 	type row struct {
 		name  string
 		count int
-		total int
+		total float64
 	}
 	rows := make([]row, 0, len(breakdown))
 	for name, item := range breakdown {
@@ -253,6 +269,7 @@ func formatBreakdown(breakdown map[string]struct {
 		"ip":              "IP traffic",
 		"domain":          "Domain traffic",
 		"whitelist":       "Whitelist",
+		"flood":           "🔥 Flood",
 	}
 
 	lines := make([]string, 0, len(rows))
@@ -261,7 +278,7 @@ func formatBreakdown(breakdown map[string]struct {
 		if label == "" {
 			label = row.name
 		}
-		lines = append(lines, fmt.Sprintf("  %s: %d hits (+%d)", label, row.count, row.total))
+		lines = append(lines, fmt.Sprintf("  %s: %d hits (+%g)", label, row.count, row.total))
 	}
 	return strings.Join(lines, "\n")
 }

@@ -135,14 +135,16 @@ scoring:
   threshold: 800
   window_seconds: 60
   alert_cooldown: 120
+  flood_threshold: 200
   points:
     domain: 1
     ip: 3
     whitelist: 0
     spam: 50
     local_net: 10
-    ssh: 25
+    ssh: 15
     suspicious_port: 30
+    flood: 10
   spam_ports:
     - "25"
     - "465"
@@ -194,7 +196,6 @@ whitelist:
     - aws
     - telegram
     - spotify
-    - cloudflare
     - yandex
     - ya.ru
     - kinopoisk
