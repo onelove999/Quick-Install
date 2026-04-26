@@ -347,7 +347,7 @@ func summarizeUserActivity(emailDomains map[string]map[string]*domainStat) []str
 				isBurst = true
 			}
 
-			if rpm >= 1.0 || isBurst {
+			if (rpm >= 1.0 || isBurst) && ds.Count >= 100 {
 				dRows = append(dRows, domainRow{Domain: domain, Count: ds.Count, RPM: rpm, IsBurst: isBurst})
 			}
 		}
@@ -362,8 +362,8 @@ func summarizeUserActivity(emailDomains map[string]map[string]*domainStat) []str
 			}
 		}
 
-		// Filter: only users with overall >= 1 req/min
-		if overallRPM < 1.0 {
+		// Filter: only users with overall >= 1 req/min and at least one specific heavy domain
+		if overallRPM < 1.0 || len(dRows) == 0 {
 			continue
 		}
 
