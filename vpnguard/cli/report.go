@@ -3,9 +3,11 @@ package cli
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"vpnguard/alerter"
 	"vpnguard/config"
@@ -32,6 +34,7 @@ func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
 	emailIPs := map[string]map[string]struct{}{}
 	suspiciousPorts := map[string]int{}
 	offenders := map[string]float64{}
+	emailDomains := map[string]map[string]*domainStat{}
 	scorer := daemon.NewScorer(cfg)
 
 	for _, file := range files {
@@ -64,9 +67,29 @@ func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
 			}
 
 			host, port := daemon.SplitDestination(entry.Destination)
-			_ = host
 			if isSuspicious(cfg, port) {
 				suspiciousPorts[port]++
+			}
+
+			if entry.Email != "" {
+				if _, ok := emailDomains[entry.Email]; !ok {
+					emailDomains[entry.Email] = map[string]*domainStat{}
+				}
+				if ds, ok := emailDomains[entry.Email][host]; ok {
+					ds.Count++
+					if entry.Timestamp.Before(ds.First) {
+						ds.First = entry.Timestamp
+					}
+					if entry.Timestamp.After(ds.Last) {
+						ds.Last = entry.Timestamp
+					}
+				} else {
+					emailDomains[entry.Email][host] = &domainStat{
+						Count: 1,
+						First: entry.Timestamp,
+						Last:  entry.Timestamp,
+					}
+				}
 			}
 			if alert := scorer.Add(entry); alert != nil {
 				key := fmt.Sprintf("%s|%s", alert.Email, alert.IP)
@@ -98,6 +121,9 @@ func RunReport(cfg *config.Config, tg *alerter.Telegram) error {
 
 	reportLines = append(reportLines, "", "Top offenders by score:")
 	reportLines = append(reportLines, topOffenders(offenders, 10)...)
+
+	reportLines = append(reportLines, "", "Suspicious user activity:")
+	reportLines = append(reportLines, summarizeUserActivity(emailDomains)...)
 
 	output := strings.Join(reportLines, "\n") + "\n"
 	fmt.Println(output)
@@ -265,4 +291,98 @@ func empty(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+type domainStat struct {
+	Count int
+	First time.Time
+	Last  time.Time
+}
+
+func summarizeUserActivity(emailDomains map[string]map[string]*domainStat) []string {
+	if len(emailDomains) == 0 {
+		return []string{"- no data"}
+	}
+
+	const (
+		minRPM      = 10.0 // elevated+
+		minRequests = 500
+	)
+
+	type domainRow struct {
+		Domain string
+		Count  int
+		RPM    float64
+	}
+
+	type userRow struct {
+		Email   string
+		Total   int
+		Domains []domainRow
+	}
+
+	users := make([]userRow, 0)
+	for email, domains := range emailDomains {
+		total := 0
+		hasElevated := false
+		dRows := make([]domainRow, 0, len(domains))
+		for domain, ds := range domains {
+			total += ds.Count
+			rpm := 0.0
+			duration := ds.Last.Sub(ds.First)
+			if duration > 0 {
+				minutes := duration.Minutes()
+				if minutes > 0 {
+					rpm = math.Round(float64(ds.Count)/minutes*10) / 10
+				}
+			}
+			if rpm > minRPM {
+				hasElevated = true
+			}
+			dRows = append(dRows, domainRow{Domain: domain, Count: ds.Count, RPM: rpm})
+		}
+
+		if !hasElevated && total < minRequests {
+			continue
+		}
+
+		sort.Slice(dRows, func(i, j int) bool {
+			return dRows[i].Count > dRows[j].Count
+		})
+		if len(dRows) > 5 {
+			dRows = dRows[:5]
+		}
+
+		users = append(users, userRow{Email: email, Total: total, Domains: dRows})
+	}
+
+	if len(users) == 0 {
+		return []string{"- no suspicious activity detected"}
+	}
+
+	sort.Slice(users, func(i, j int) bool {
+		return users[i].Total > users[j].Total
+	})
+
+	out := make([]string, 0)
+	for _, u := range users {
+		out = append(out, fmt.Sprintf("\n  📧 email: %s — %d requests total", u.Email, u.Total))
+		for _, d := range u.Domains {
+			label := "normal"
+			switch {
+			case d.RPM > 100:
+				label = "⚠️ anomaly"
+			case d.RPM > 30:
+				label = "high"
+			case d.RPM > 10:
+				label = "elevated"
+			}
+			rpmStr := ""
+			if d.RPM > 0 {
+				rpmStr = fmt.Sprintf(", ~%.1f req/min", d.RPM)
+			}
+			out = append(out, fmt.Sprintf("    %s: %d hits%s [%s]", d.Domain, d.Count, rpmStr, label))
+		}
+	}
+	return out
 }
