@@ -99,7 +99,11 @@ func (q *Qwen) Analyze(logs []string) (string, error) {
 		return "", fmt.Errorf("empty response from qwen")
 	}
 
-	return strings.TrimSpace(result.Choices[0].Message.Content), nil
+	content := result.Choices[0].Message.Content
+	if idx := strings.Index(content, "<details>"); idx != -1 {
+		content = content[:idx]
+	}
+	return strings.TrimSpace(content), nil
 }
 
 func (q *Qwen) ListModels() ([]string, error) {
