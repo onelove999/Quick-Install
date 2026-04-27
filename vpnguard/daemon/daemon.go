@@ -209,7 +209,7 @@ func (m *Monitor) processAlertAsync(alert *Alert, ip string) {
 		
 		aiResult, err := m.ai.Analyze(alert.RecentLines)
 		if err != nil {
-			m.logger.Printf("gemini api error: %v", err)
+			m.logger.Printf("ai analysis error: %v", err)
 			alert.AIError = err.Error()
 		} else {
 			alert.AIResult = aiResult

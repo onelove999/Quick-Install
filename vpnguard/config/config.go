@@ -22,6 +22,10 @@ type Config struct {
 
 type AIConfig struct {
 	Enabled     bool   `yaml:"enabled"`
+	Prompt      string `yaml:"prompt"`
+	QwenToken   string `yaml:"qwen_token"`
+	QwenURL     string `yaml:"qwen_url"`
+	QwenModel   string `yaml:"qwen_model"`
 	GeminiToken string `yaml:"gemini_token"`
 }
 
@@ -84,6 +88,27 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.AlertLog == "" {
 		cfg.AlertLog = "/var/log/remnanode/guard_alerts.log"
+	}
+	if cfg.AI.QwenURL == "" {
+		cfg.AI.QwenURL = "https://qwen.aikit.club/v1"
+	}
+	if cfg.AI.QwenModel == "" {
+		cfg.AI.QwenModel = "qwen3.5-flash"
+	}
+	if cfg.AI.Prompt == "" {
+		cfg.AI.Prompt = `Проанализируй логи Xray. Твоя задача — выявить нарушения правил использования VPN.
+
+Технические маркеры нарушений:
+- Торренты (P2P): частые соединения на разные нестандартные (высокие) порты.
+- Рассылка спама: TCP-соединения на порты 25, 465, 587.
+- Сканирование портов: запросы на множество разных портов одного IP или перебор IP-адресов.
+- DDoS-атаки / Флуд: аномально большое количество соединений с одним целевым IP за короткое время.
+- Вредоносное ПО / Ботнет: обращения к известным подозрительным портам или массовые однотипные запросы.
+
+Формат ответа строго 3 строки, без приветствий и лишних рассуждений:
+Строка 1: [НАРУШЕНИЕ] / [ПОДОЗРИТЕЛЬНО] / [ЧИСТО]
+Строка 2: Причина: <конкретный пункт правил или прочерк>
+Строка 3: Доказательства: <выжимка фактов из лога: протокол, целевые порты, частота>`
 	}
 
 	if cfg.Scoring.Threshold == 0 {

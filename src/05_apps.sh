@@ -105,10 +105,13 @@ generate_vpnguard_config() {
     node_name="${node_name:-$default_node_name}"
     read -rp "$(printf "${CYAN}Telegram Bot Token (можно оставить пустым): ${NC}")" tg_bot_token
     read -rp "$(printf "${CYAN}Telegram Chat ID (можно оставить пустым): ${NC}")" tg_chat_id
-    read -rp "$(printf "${CYAN}Gemini 2.5 API Token (AI анализ, можно оставить пустым): ${NC}")" tg_gemini_token
+    echo ""
+    info "AI Анализ (Qwen — основной, Gemini — запасной)"
+    read -rp "$(printf "${CYAN}Qwen API Token (можно оставить пустым): ${NC}")" qwen_token
+    read -rp "$(printf "${CYAN}Gemini API Token (можно оставить пустым): ${NC}")" gemini_token
 
     local ai_enabled="false"
-    if [ -n "$tg_gemini_token" ]; then
+    if [ -n "$qwen_token" ] || [ -n "$gemini_token" ]; then
         ai_enabled="true"
     fi
 
@@ -129,7 +132,24 @@ telegram:
 
 ai:
   enabled: ${ai_enabled}
-  gemini_token: "${tg_gemini_token}"
+  prompt: |
+    Проанализируй логи Xray. Твоя задача — выявить нарушения правил использования VPN.
+
+    Технические маркеры нарушений:
+    - Торренты (P2P): частые соединения на разные нестандартные (высокие) порты.
+    - Рассылка спама: TCP-соединения на порты 25, 465, 587.
+    - Сканирование портов: запросы на множество разных портов одного IP или перебор IP-адресов.
+    - DDoS-атаки / Флуд: аномально большое количество соединений с одним целевым IP за короткое время.
+    - Вредоносное ПО / Ботнет: обращения к известным подозрительным портам или массовые однотипные запросы.
+
+    Формат ответа строго 3 строки, без приветствий и лишних рассуждений:
+    Строка 1: [НАРУШЕНИЕ] / [ПОДОЗРИТЕЛЬНО] / [ЧИСТО]
+    Строка 2: Причина: <конкретный пункт правил или прочерк>
+    Строка 3: Доказательства: <выжимка фактов из лога: протокол, целевые порты, частота>
+  qwen_token: "${qwen_token}"
+  qwen_url: "https://qwen.aikit.club/v1"
+  qwen_model: "qwen3.5-flash"
+  gemini_token: "${gemini_token}"
 
 scoring:
   threshold: 800
@@ -376,19 +396,29 @@ do_vpnguard_settings() {
         header "Настройки VPN Guard" "Мониторинг > VPN Guard"
 
         local node_name bot_token chat_id threshold cooldown status_line
+        local qwen_token qwen_model gemini_token ai_enabled
         node_name="$(vpnguard_get_value "node_name")"
         bot_token="$(vpnguard_get_value "  bot_token")"
         chat_id="$(vpnguard_get_value "  chat_id")"
         threshold="$(vpnguard_get_value "  threshold")"
         cooldown="$(vpnguard_get_value "  alert_cooldown")"
+        qwen_token="$(vpnguard_get_value "  qwen_token")"
+        qwen_model="$(vpnguard_get_value "  qwen_model")"
+        gemini_token="$(vpnguard_get_value "  gemini_token")"
+        ai_enabled="$(vpnguard_get_value "  enabled")"
         
         status_line="$(get_docker_status "vpnguard")"
 
         printf "${BLUE}─── Текущая конфигурация ────────── ${status_line} ──${NC}\n"
-        printf "  • Имя ноды:    ${BOLD}%s${NC}\n" "${node_name}"
-        printf "  • Бот Токен:   ${BOLD}%s${NC}\n" "$(vpnguard_mask_token "$bot_token")"
-        printf "  • Chat ID:     ${BOLD}%s${NC}\n" "${chat_id:-"(не задан)"}"
+        printf "  • Имя ноды:       ${BOLD}%s${NC}\n" "${node_name}"
+        printf "  • Бот Токен:      ${BOLD}%s${NC}\n" "$(vpnguard_mask_token "$bot_token")"
+        printf "  • Chat ID:        ${BOLD}%s${NC}\n" "${chat_id:-"(не задан)"}"
         printf "  • Порог/Кулдаун:  ${BOLD}%s баллов / %s сек.${NC}\n" "${threshold}" "${cooldown}"
+        printf "${BLUE}─── AI Анализ ──────────────────────────────────────${NC}\n"
+        printf "  • AI:          ${BOLD}%s${NC}\n" "${ai_enabled}"
+        printf "  • Qwen токен:  ${BOLD}%s${NC}\n" "$(vpnguard_mask_token "$qwen_token")"
+        printf "  • Qwen модель: ${BOLD}%s${NC}\n" "${qwen_model:-"(не задана)"}"
+        printf "  • Gemini:      ${BOLD}%s${NC}\n" "$(vpnguard_mask_token "$gemini_token")"
         printf "${BLUE}─────────────────────────────────────────────────────${NC}\n"
         echo ""
         printf "${BOLD}  1)${NC} Изменить Telegram Bot Token\n"
@@ -396,6 +426,11 @@ do_vpnguard_settings() {
         printf "${BOLD}  3)${NC} Изменить имя ноды\n"
         printf "${BOLD}  4)${NC} Изменить порог баллов\n"
         printf "${BOLD}  5)${NC} Изменить кулдаун алерта\n"
+        echo ""
+        printf "${BLUE}─── AI ─────────────────────────────────────────────${NC}\n"
+        printf "${BOLD}  7)${NC} Изменить Qwen токен\n"
+        printf "${BOLD}  8)${NC} Изменить модель Qwen (показать список)\n"
+        printf "${BOLD}  9)${NC} Изменить Gemini токен\n"
         echo ""
         printf "${BOLD}  6)${NC} Редактировать конфиг вручную (nano)\n"
         printf "${BOLD}  0)${NC} ← Назад\n"
@@ -426,6 +461,33 @@ do_vpnguard_settings() {
             5)
                 read -rp "$(printf "${CYAN}Новый кулдаун (сек): ${NC}")" value
                 vpnguard_update_config_value "  alert_cooldown" "${value}"
+                compose_vpnguard restart
+                ;;
+            7)
+                read -rp "$(printf "${CYAN}Новый Qwen API Token: ${NC}")" value
+                vpnguard_update_config_value "  qwen_token" "\"${value}\""
+                if [ -n "$value" ]; then
+                    vpnguard_update_config_value "  enabled" "true"
+                fi
+                compose_vpnguard restart
+                ;;
+            8)
+                info "Запрашиваю список моделей Qwen..."
+                echo ""
+                compose_vpnguard run --rm vpnguard --list-models 2>/dev/null
+                echo ""
+                read -rp "$(printf "${CYAN}Введите имя модели: ${NC}")" value
+                if [ -n "$value" ]; then
+                    vpnguard_update_config_value "  qwen_model" "\"${value}\""
+                    compose_vpnguard restart
+                fi
+                ;;
+            9)
+                read -rp "$(printf "${CYAN}Новый Gemini API Token: ${NC}")" value
+                vpnguard_update_config_value "  gemini_token" "\"${value}\""
+                if [ -n "$value" ]; then
+                    vpnguard_update_config_value "  enabled" "true"
+                fi
                 compose_vpnguard restart
                 ;;
             6)
