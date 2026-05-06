@@ -9,6 +9,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/02_ufw.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/03_node_geo.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/04_system.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/05_apps.sh"
+source "$(dirname "${BASH_SOURCE[0]}")/06_diagnostics.sh"
 
 do_self_update() {
     header "Обновление утилиты QI" "Обновление"

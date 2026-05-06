@@ -1152,6 +1152,9 @@ menu_tests() {
         printf "${BOLD}  8)${NC} Bench.sh (Info + IPv4/IPv6 Speed)\n"
         printf "${BOLD}  9)${NC} Тест CPU (через sysbench)\n"
         echo ""
+        printf "${BLUE}─── Диагностика узких мест ──────────────────────────${NC}\n"
+        printf "${BOLD} 10)${NC} Комплексная диагностика ноды (Анализ проблем)\n"
+        echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
         read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
@@ -1166,6 +1169,7 @@ menu_tests() {
             7) do_test_yabs ;;
             8) do_test_bench_sh ;;
             9) do_test_cpu_sysbench ;;
+            10) do_run_diagnostics ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac

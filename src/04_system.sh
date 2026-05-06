@@ -36,62 +36,98 @@ do_update() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# 2. УСТАНОВКА TCP BBR
+# 2. УСТАНОВКА TCP BBR И ПРОДВИНУТЫЙ ТЮНИНГ СЕТИ
 # ═══════════════════════════════════════════════════════════════
-do_install_bbr() {
-    header "Установка TCP BBR" "Система"
+do_network_tuning() {
+    header "TCP BBR и Тюнинг сети" "Система"
 
-    local sysctl_file="/etc/sysctl.d/99-bbr.conf"
+    local bbr_conf="/etc/sysctl.d/99-bbr.conf"
+    local tuning_conf="/etc/sysctl.d/99-vpn-tuning.conf"
+    
     local cur_cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
     local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
     local kernel_ver=$(uname -r)
 
     info "Текущее ядро: ${BOLD}${kernel_ver}${NC}"
-    info "Алгоритм (Congestion Control): ${BOLD}${cur_cc}${NC}"
-    info "Очередь (Default Qdisc):      ${BOLD}${cur_qdisc}${NC}"
+    info "Алгоритм (CC):  ${BOLD}${cur_cc}${NC} | Очередь (Qdisc): ${BOLD}${cur_qdisc}${NC}"
 
-    if [ "$cur_cc" = "bbr" ]; then
-        success "Вердикт: BBR уже активен и используется."
+    if [ "$cur_cc" = "bbr" ] && [ -f "$tuning_conf" ]; then
+        success "Вердикт: BBR и продвинутый тюнинг АКТИВНЫ."
+    elif [ "$cur_cc" = "bbr" ]; then
+        warn "Вердикт: Активен только BBR (без полного тюнинга)."
     else
-        warn "Вердикт: BBR не активен (установлен $cur_cc)."
+        warn "Вердикт: Используются стандартные параметры ядра."
     fi
 
     echo ""
     printf "Доступные действия:\n"
-    if [ "$cur_cc" = "bbr" ]; then
-        printf "${BOLD}  1)${NC} Обновить / Переустановить конфиг BBR\n"
-        printf "${BOLD}  2)${NC} ${RED}Отключить BBR${NC} (вернуть cubic)\n"
+    if [ "$cur_cc" = "bbr" ] || [ -f "$tuning_conf" ]; then
+        printf "${BOLD}  1)${NC} Обновить / Переустановить BBR + Тюнинг\n"
+        printf "${BOLD}  2)${NC} ${RED}Отключить BBR и Тюнинг${NC} (вернуть стандарт)\n"
     else
-        printf "${BOLD}  1)${NC} Включить TCP BBR (Рекомендуется)\n"
+        printf "${BOLD}  1)${NC} Включить TCP BBR и Продвинутый тюнинг (Рекомендуется)\n"
     fi
     printf "${BOLD}  0)${NC} ← Назад\n"
     echo ""
-    read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" bbr_choice
+    read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" tune_choice
 
-    case "$bbr_choice" in
+    case "$tune_choice" in
         1)
-            info "Настройка BBR..."
+            info "Создание резервной копии текущих настроек..."
+            mkdir -p /var/backups/quick-install 2>/dev/null
+            sysctl -a > /var/backups/quick-install/sysctl-backup-$(date +%Y%m%d-%H%M%S).txt 2>/dev/null
+
+            info "Настройка BBR и применение оптимизаций..."
             measure_time bash -c "
                 modprobe tcp_bbr 2>/dev/null || true
-                sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1
-                sysctl -w net.ipv4.tcp_congestion_control=bbr >/dev/null 2>&1
                 mkdir -p /etc/sysctl.d
-                echo 'net.core.default_qdisc = fq' > $sysctl_file
-                echo 'net.ipv4.tcp_congestion_control = bbr' >> $sysctl_file
-                sysctl --system >/dev/null 2>&1
+                
+                # Конфиг BBR
+                echo 'net.core.default_qdisc = fq' > $bbr_conf
+                echo 'net.ipv4.tcp_congestion_control = bbr' >> $bbr_conf
+                
+                # Конфиг тюнинга
+                cat > $tuning_conf <<EOF
+# Базовые параметры маршрутизации
+net.ipv4.conf.all.rp_filter=0
+net.ipv4.conf.default.rp_filter=0
+
+# Оптимизация TCP для уменьшения задержек (из node-diagnostic)
+net.ipv4.tcp_mtu_probing=1
+net.ipv4.tcp_slow_start_after_idle=0
+net.ipv4.tcp_notsent_lowat=131072
+net.ipv4.tcp_fastopen=3
+
+# Увеличение буферов TCP для высокоскоростных соединений
+net.core.rmem_max=67108864
+net.core.wmem_max=67108864
+net.core.rmem_default=262144
+net.core.wmem_default=262144
+net.ipv4.tcp_rmem=4096 87380 67108864
+net.ipv4.tcp_wmem=4096 65536 67108864
+
+# Очереди и соединения (скорректировано из node-diagnostic)
+net.core.netdev_max_backlog=16384
+net.core.somaxconn=8192
+net.ipv4.tcp_max_syn_backlog=8192
+
+# Увеличение conntrack для большого количества клиентов
+net.netfilter.nf_conntrack_max=524288
+EOF
+                sysctl --system > /dev/null 2>&1
             "
-            success "Конфигурация BBR успешно применена."
+            success "TCP BBR и сетевые оптимизации успешно применены."
             ;;
         2)
-            if [ "$cur_cc" = "bbr" ]; then
-                info "Отключение BBR..."
+            if [ "$cur_cc" = "bbr" ] || [ -f "$tuning_conf" ]; then
+                info "Отключение BBR и сетевого тюнинга..."
                 measure_time bash -c "
-                    rm -f $sysctl_file
+                    rm -f $bbr_conf $tuning_conf
                     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
                     sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1
                     sysctl --system >/dev/null 2>&1
                 "
-                success "BBR отключен, система возвращена к стандартным настройкам."
+                success "Система возвращена к стандартным настройкам сети."
             fi
             ;;
         0|*) return ;;
@@ -261,57 +297,200 @@ menu_ipv6() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# 5. ТЮНИНГ СЕТИ
+# 5. НАСТРОЙКА MSS CLAMP (ДЛЯ ТУННЕЛЕЙ С PMTU < 1500)
 # ═══════════════════════════════════════════════════════════════
-do_network_tuning() {
-    header "Продвинутый тюнинг сети" "Система"
-    local conf_file="/etc/sysctl.d/99-vpn-tuning.conf"
+do_mss_clamp() {
+    header "Настройка MSS Clamp" "Система"
     
-    local rmem=$(sysctl -n net.core.rmem_max 2>/dev/null)
-    local wmem=$(sysctl -n net.core.wmem_max 2>/dev/null)
-    local fastopen=$(sysctl -n net.ipv4.tcp_fastopen 2>/dev/null)
-
-    info "TCP Read Buffer (max):  ${BOLD}${rmem}${NC}"
-    info "TCP Write Buffer (max): ${BOLD}${wmem}${NC}"
-    info "TCP FastOpen status:    ${BOLD}${fastopen}${NC}"
-
-    if [ -f "$conf_file" ]; then
-        success "Вердикт: Продвинутый тюнинг АКТИВИРОВАН."
+    info "Правило TCPMSS --clamp-mss-to-pmtu помогает избежать проблем с"
+    info "фрагментацией (например, долго грузятся картинки) при использовании"
+    info "туннелей (WireGuard, GRE, IPsec, NetBird и др.) с MTU < 1500."
+    echo ""
+    
+    local rule_args="-p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu"
+    
+    # Проверка наличия правил
+    local has_forward=0
+    local has_output=0
+    
+    if iptables -t mangle -C FORWARD $rule_args 2>/dev/null; then has_forward=1; fi
+    if iptables -t mangle -C OUTPUT $rule_args 2>/dev/null; then has_output=1; fi
+    
+    if [ "$has_forward" = "1" ] && [ "$has_output" = "1" ]; then
+        success "Вердикт: Правила MSS Clamp уже ПРИМЕНЕНЫ."
+        echo ""
+        read -rp "$(printf "${YELLOW}Вы хотите УДАЛИТЬ правила MSS Clamp? [y/N]: ${NC}")" confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            measure_time bash -c "
+                iptables -t mangle -D FORWARD $rule_args 2>/dev/null || true
+                iptables -t mangle -D OUTPUT $rule_args 2>/dev/null || true
+                if command -v netfilter-persistent >/dev/null 2>&1; then
+                    netfilter-persistent save >/dev/null 2>&1
+                fi
+            "
+            success "Правила MSS Clamp успешно удалены."
+        fi
     else
-        warn "Вердикт: Используются стандартные параметры ядра."
+        warn "Вердикт: Правила MSS Clamp НЕ активны."
+        echo ""
+        read -rp "$(printf "${CYAN}Вы хотите ДОБАВИТЬ правила MSS Clamp? [y/N]: ${NC}")" confirm
+        if [[ "$confirm" =~ ^[Yy]$ ]]; then
+            info "Применение правил iptables..."
+            measure_time bash -c "
+                [ \"$has_forward\" = \"0\" ] && iptables -t mangle -A FORWARD $rule_args
+                [ \"$has_output\" = \"0\" ] && iptables -t mangle -A OUTPUT $rule_args
+                
+                # Попытка сохранить правила, если установлены пакеты
+                if command -v netfilter-persistent >/dev/null 2>&1; then
+                    netfilter-persistent save >/dev/null 2>&1
+                elif [ -d /etc/iptables ] && command -v iptables-save >/dev/null 2>&1; then
+                    iptables-save > /etc/iptables/rules.v4
+                fi
+            "
+            success "Правила MSS Clamp успешно применены."
+            if ! command -v netfilter-persistent >/dev/null 2>&1; then
+                warn "Пакет iptables-persistent не найден. Правила могут пропасть после перезагрузки."
+            fi
+        fi
+    fi
+    press_enter
+}
+
+# ═══════════════════════════════════════════════════════════════
+# 6. АППАРАТНЫЙ ТЮНИНГ (RPS и Ring Buffers)
+# ═══════════════════════════════════════════════════════════════
+do_hardware_tuning() {
+    header "Аппаратный тюнинг NIC" "Система"
+    
+    local iface=$(ip -4 route show default 2>/dev/null | awk '/default/ {print $5; exit}')
+    if [ -z "$iface" ]; then
+        error "Не удалось определить основной сетевой интерфейс."
+        press_enter
+        return
+    fi
+    info "Основной интерфейс: ${BOLD}${iface}${NC}"
+    echo ""
+    
+    info "Выполняется диагностика..."
+    
+    local needs_rps=0
+    local needs_ring=0
+    local rps_msg=""
+    local ring_msg=""
+    
+    # 1. Проверка прерываний (RPS)
+    local rps_active=0
+    for q in /sys/class/net/"$iface"/queues/rx-*; do
+        [ -d "$q" ] || continue
+        local val=$(cat "$q/rps_cpus" 2>/dev/null)
+        if [ "$val" != "0" ] && [ -n "$val" ]; then
+            rps_active=1
+            break
+        fi
+    done
+    
+    if [ "$rps_active" = "1" ] || systemctl is-enabled vpn-rps.service >/dev/null 2>&1; then
+        success "RPS (Receive Packet Steering): АКТИВЕН"
+    else
+        needs_rps=1
+        warn "RPS (Receive Packet Steering): ВЫКЛЮЧЕН"
+        rps_msg="Рекомендуется включить RPS для распределения сетевых прерываний по всем ядрам CPU."
+    fi
+
+    # 2. Проверка Ring Buffers
+    local max_rx="" cur_rx="" max_tx="" cur_tx="" rx_drops="0" tx_drops="0"
+    rx_drops=$(ip -s link show "$iface" | awk '/RX:/{getline; print $4}')
+    tx_drops=$(ip -s link show "$iface" | awk '/TX:/{getline; print $4}')
+    
+    if command -v ethtool >/dev/null 2>&1; then
+        max_rx=$(ethtool -g "$iface" 2>/dev/null | awk '/Pre-set maximums/,/Current/' | awk '/RX:/ {print $2; exit}')
+        cur_rx=$(ethtool -g "$iface" 2>/dev/null | awk '/Current hardware settings/,0' | awk '/RX:/ {print $2; exit}')
+        max_tx=$(ethtool -g "$iface" 2>/dev/null | awk '/Pre-set maximums/,/Current/' | awk '/TX:/ {print $2; exit}')
+        
+        if [ -z "$max_rx" ] || [ "$max_rx" = "0" ]; then
+            warn "Ring Buffers: Не поддерживается драйвером (часто на виртуалках virtio_net)."
+        elif [ "$cur_rx" = "$max_rx" ] || systemctl is-enabled vpn-ring.service >/dev/null 2>&1; then
+            success "Ring Buffers: НА МАКСИМУМЕ ($cur_rx/$max_rx) | Дропы: RX=${rx_drops:-0}, TX=${tx_drops:-0}"
+        else
+            needs_ring=1
+            warn "Ring Buffers: Текущие ($cur_rx), Максимальные ($max_rx) | Дропы: RX=${rx_drops:-0}, TX=${tx_drops:-0}"
+            ring_msg="Рекомендуется увеличить Ring Buffers до максимума для снижения потерь пакетов."
+        fi
+    else
+        warn "Ring Buffers: утилита ethtool не установлена. Для проверки выполните: apt install ethtool"
     fi
 
     echo ""
-    if [ -f "$conf_file" ]; then
-        read -rp "$(printf "${YELLOW}Вы хотите ОТКЛЮЧИТЬ тюнинг и вернуть стандартные настройки? [y/N]: ${NC}")" confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            measure_time bash -c "rm -f $conf_file && sysctl --system > /dev/null 2>&1"
-            success "Тюнинг успешно отключен."
+    if [ "$needs_rps" = "0" ] && [ "$needs_ring" = "0" ]; then
+        success "Аппаратные оптимизации не требуются или уже применены."
+        if systemctl is-enabled vpn-rps.service >/dev/null 2>&1 || systemctl is-enabled vpn-ring.service >/dev/null 2>&1; then
+            echo ""
+            read -rp "$(printf "${YELLOW}Отключить аппаратные оптимизации и удалить сервисы? [y/N]: ${NC}")" confirm
+            if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                systemctl disable --now vpn-rps.service 2>/dev/null || true
+                systemctl disable --now vpn-ring.service 2>/dev/null || true
+                rm -f /etc/systemd/system/vpn-rps.service /etc/systemd/system/vpn-ring.service
+                systemctl daemon-reload
+                for q in /sys/class/net/$iface/queues/rx-*; do [ -d "$q" ] && echo 0 > "$q/rps_cpus" 2>/dev/null || true; done
+                success "Аппаратные оптимизации успешно отключены."
+            fi
+        fi
+        press_enter
+        return
+    fi
+    
+    [ "$needs_rps" = "1" ] && info "-> $rps_msg"
+    [ "$needs_ring" = "1" ] && info "-> $ring_msg"
+    
+    echo ""
+    read -rp "$(printf "${CYAN}Установить предложенные аппаратные оптимизации (создадутся systemd сервисы)? [y/N]: ${NC}")" confirm
+    if [[ "$confirm" =~ ^[Yy]$ ]]; then
+        info "Применение оптимизаций..."
+        
+        if [ "$needs_rps" = "1" ]; then
+            local n=$(nproc)
+            local mask=$(printf '%x' $(( (1 << n) - 1 )))
+            
+            cat > /etc/systemd/system/vpn-rps.service <<UNIT
+[Unit]
+Description=Apply RPS mask for $iface
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do echo $mask > \$\$q/rps_cpus; done'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+            systemctl daemon-reload
+            systemctl enable --now vpn-rps.service >/dev/null 2>&1
+            success "Служба vpn-rps.service (RPS) установлена и запущена."
+        fi
+        
+        if [ "$needs_ring" = "1" ]; then
+            cat > /etc/systemd/system/vpn-ring.service <<UNIT
+[Unit]
+Description=Apply NIC ring buffers for $iface
+After=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ethtool -G $iface rx $max_rx tx $max_tx
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+            systemctl daemon-reload
+            systemctl enable --now vpn-ring.service >/dev/null 2>&1
+            success "Служба vpn-ring.service (Ring Buffers) установлена и запущена."
         fi
     else
-        read -rp "$(printf "${CYAN}Вы хотите ВКЛЮЧИТЬ продвинутый тюнинг для VPN? [y/N]: ${NC}")" confirm
-        if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            info "Применение оптимизаций..."
-            measure_time bash -c "
-                cat > $conf_file <<EOF
-net.ipv4.conf.all.rp_filter=0
-net.ipv4.conf.default.rp_filter=0
-net.core.rmem_max=67108864
-net.core.wmem_max=67108864
-net.core.rmem_default=262144
-net.core.wmem_default=262144
-net.core.netdev_max_backlog=250000
-net.core.somaxconn=4096
-net.ipv4.tcp_fastopen=3
-net.ipv4.tcp_rmem=4096 87380 67108864
-net.ipv4.tcp_wmem=4096 65536 67108864
-net.ipv4.tcp_mtu_probing=1
-EOF
-                sysctl --system > /dev/null 2>&1
-            "
-            success "Сетевые параметры успешно оптимизированы."
-        fi
+        info "Действие отменено."
     fi
+    
     press_enter
 }
 
@@ -324,9 +503,10 @@ menu_system() {
         printf "${BOLD}  2)${NC} Настройка SWAP\n"
         echo ""
         printf "${BLUE}─── Сетевые настройки ───────────────────────────────${NC}\n"
-        printf "${BOLD}  3)${NC} Установка TCP BBR (Ускорение сети)\n"
-        printf "${BOLD}  4)${NC} Продвинутый тюнинг сети (VPN)\n"
-        printf "${BOLD}  5)${NC} Управление IPv6\n"
+        printf "${BOLD}  3)${NC} Установка TCP BBR и Тюнинг сети\n"
+        printf "${BOLD}  4)${NC} Управление IPv6\n"
+        printf "${BOLD}  5)${NC} Настройка MSS Clamp (для туннелей)\n"
+        printf "${BOLD}  6)${NC} Аппаратный тюнинг (RPS и Ring Buffers)\n"
         echo ""
         printf "${BOLD}  0)${NC} ← Назад\n"
         echo ""
@@ -335,9 +515,10 @@ menu_system() {
         case "$choice" in
             1) do_update ;;
             2) do_setup_swap ;;
-            3) do_install_bbr ;;
-            4) do_network_tuning ;;
-            5) menu_ipv6 ;;
+            3) do_network_tuning ;;
+            4) menu_ipv6 ;;
+            5) do_mss_clamp ;;
+            6) do_hardware_tuning ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
