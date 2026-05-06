@@ -350,6 +350,23 @@ do_mss_clamp() {
             success "Правила MSS Clamp успешно применены."
             if ! command -v netfilter-persistent >/dev/null 2>&1; then
                 warn "Пакет iptables-persistent не найден. Правила могут пропасть после перезагрузки."
+                echo ""
+                read -rp "$(printf "${CYAN}Хотите установить iptables-persistent для сохранения правил? [Y/n]: ${NC}")" install_persistent
+                if [[ ! "$install_persistent" =~ ^[Nn]$ ]]; then
+                    info "Установка iptables-persistent..."
+                    if command -v debconf-set-selections >/dev/null 2>&1; then
+                        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
+                        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
+                    fi
+                    export DEBIAN_FRONTEND=noninteractive
+                    apt-get update -qq && apt-get install -y -qq iptables-persistent netfilter-persistent
+                    if command -v netfilter-persistent >/dev/null 2>&1; then
+                        netfilter-persistent save >/dev/null 2>&1
+                        success "Пакет успешно установлен, правила MSS Clamp сохранены."
+                    else
+                        error "Не удалось установить iptables-persistent."
+                    fi
+                fi
             fi
         fi
     fi
