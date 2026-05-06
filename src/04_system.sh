@@ -324,10 +324,12 @@ do_mss_clamp() {
             measure_time bash -c "
                 iptables -t mangle -D FORWARD $rule_args 2>/dev/null || true
                 iptables -t mangle -D OUTPUT $rule_args 2>/dev/null || true
-                if command -v netfilter-persistent >/dev/null 2>&1; then
-                    netfilter-persistent save >/dev/null 2>&1
-                fi
             "
+            if [ -f /etc/systemd/system/qi-mss-clamp.service ]; then
+                systemctl disable qi-mss-clamp.service >/dev/null 2>&1
+                rm -f /etc/systemd/system/qi-mss-clamp.service
+                systemctl daemon-reload >/dev/null 2>&1
+            fi
             success "Правила MSS Clamp успешно удалены."
         fi
     else
@@ -339,35 +341,28 @@ do_mss_clamp() {
             measure_time bash -c "
                 [ \"$has_forward\" = \"0\" ] && iptables -t mangle -A FORWARD $rule_args
                 [ \"$has_output\" = \"0\" ] && iptables -t mangle -A OUTPUT $rule_args
-                
-                # Попытка сохранить правила, если установлены пакеты
-                if command -v netfilter-persistent >/dev/null 2>&1; then
-                    netfilter-persistent save >/dev/null 2>&1
-                elif [ -d /etc/iptables ] && command -v iptables-save >/dev/null 2>&1; then
-                    iptables-save > /etc/iptables/rules.v4
-                fi
             "
             success "Правила MSS Clamp успешно применены."
-            if ! command -v netfilter-persistent >/dev/null 2>&1; then
-                warn "Пакет iptables-persistent не найден. Правила могут пропасть после перезагрузки."
-                echo ""
-                read -rp "$(printf "${CYAN}Хотите установить iptables-persistent для сохранения правил? [Y/n]: ${NC}")" install_persistent
-                if [[ ! "$install_persistent" =~ ^[Nn]$ ]]; then
-                    info "Установка iptables-persistent..."
-                    if command -v debconf-set-selections >/dev/null 2>&1; then
-                        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections
-                        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections
-                    fi
-                    export DEBIAN_FRONTEND=noninteractive
-                    apt-get update -qq && apt-get install -y -qq iptables-persistent netfilter-persistent
-                    if command -v netfilter-persistent >/dev/null 2>&1; then
-                        netfilter-persistent save >/dev/null 2>&1
-                        success "Пакет успешно установлен, правила MSS Clamp сохранены."
-                    else
-                        error "Не удалось установить iptables-persistent."
-                    fi
-                fi
-            fi
+            
+            # Создаем независимый systemd сервис для сохранения правил при перезагрузке
+            info "Создание автозапуска для правил MSS Clamp..."
+            cat <<EOF > /etc/systemd/system/qi-mss-clamp.service
+[Unit]
+Description=Quick-Install MSS Clamp Firewall Rules
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/sbin/iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+ExecStart=/sbin/iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            systemctl daemon-reload >/dev/null 2>&1
+            systemctl enable qi-mss-clamp.service >/dev/null 2>&1
+            success "Автозапуск настроен через systemd-сервис qi-mss-clamp."
         fi
     fi
     press_enter
