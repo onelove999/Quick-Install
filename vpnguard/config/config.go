@@ -38,7 +38,6 @@ type ScoringConfig struct {
 	Threshold       float64    `yaml:"threshold"`
 	WindowSeconds   int        `yaml:"window_seconds"`
 	Cooldown        int        `yaml:"alert_cooldown"`
-	FloodThreshold  int        `yaml:"flood_threshold"`
 	Points          Points     `yaml:"points"`
 	SpamPorts       []string   `yaml:"spam_ports"`
 	SuspiciousPorts []string   `yaml:"suspicious_ports"`
@@ -53,7 +52,6 @@ type Points struct {
 	LocalNet       float64 `yaml:"local_net"`
 	SSH            float64 `yaml:"ssh"`
 	SuspiciousPort float64 `yaml:"suspicious_port"`
-	Flood          float64 `yaml:"flood"`
 }
 
 type WhitelistConfig struct {
@@ -126,6 +124,9 @@ func applyDefaults(cfg *Config) {
 	if cfg.Scoring.Points.IP == 0 {
 		cfg.Scoring.Points.IP = 3
 	}
+	if cfg.Scoring.Points.Whitelist == 0 {
+		cfg.Scoring.Points.Whitelist = 0.8
+	}
 	if cfg.Scoring.Points.Spam == 0 {
 		cfg.Scoring.Points.Spam = 50
 	}
@@ -137,12 +138,6 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Scoring.Points.SuspiciousPort == 0 {
 		cfg.Scoring.Points.SuspiciousPort = 30
-	}
-	if cfg.Scoring.Points.Flood == 0 {
-		cfg.Scoring.Points.Flood = 10
-	}
-	if cfg.Scoring.FloodThreshold == 0 {
-		cfg.Scoring.FloodThreshold = 200
 	}
 
 	if len(cfg.Scoring.SpamPorts) == 0 {

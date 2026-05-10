@@ -68,8 +68,8 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 	now := entry.Timestamp
 	state.LastSeen = now
 	state.RecentLogLines = append(state.RecentLogLines, entry.Raw)
-	if len(state.RecentLogLines) > 5000 {
-		state.RecentLogLines = append([]string(nil), state.RecentLogLines[len(state.RecentLogLines)-5000:]...)
+	if len(state.RecentLogLines) > 1000 {
+		state.RecentLogLines = append([]string(nil), state.RecentLogLines[len(state.RecentLogLines)-1000:]...)
 	}
 
 	state.Events = append(state.Events, ScoreEvent{
@@ -79,13 +79,6 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 		Raw:      entry.Raw,
 	})
 	s.pruneEvents(state, now)
-
-	// Flood detection: count total events in window
-	totalEvents := len(state.Events)
-	floodExtra := 0.0
-	if s.cfg.Scoring.FloodThreshold > 0 && totalEvents > s.cfg.Scoring.FloodThreshold {
-		floodExtra = float64(totalEvents-s.cfg.Scoring.FloodThreshold) * s.cfg.Scoring.Points.Flood
-	}
 
 	score := 0.0
 	breakdown := map[string]struct {
@@ -98,15 +91,6 @@ func (s *Scorer) Add(entry *Entry) *Alert {
 		item.count++
 		item.total += event.Points
 		breakdown[event.Category] = item
-	}
-
-	// Add flood penalty
-	if floodExtra > 0 {
-		score += floodExtra
-		item := breakdown["flood"]
-		item.count = totalEvents - s.cfg.Scoring.FloodThreshold
-		item.total = floodExtra
-		breakdown["flood"] = item
 	}
 
 	if score < s.cfg.Scoring.Threshold {
@@ -269,7 +253,6 @@ func formatBreakdown(breakdown map[string]struct {
 		"ip":              "IP traffic",
 		"domain":          "Domain traffic",
 		"whitelist":       "Whitelist",
-		"flood":           "🔥 Flood",
 	}
 
 	lines := make([]string, 0, len(rows))
