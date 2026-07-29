@@ -155,16 +155,14 @@ scoring:
   threshold: 800
   window_seconds: 60
   alert_cooldown: 120
-  flood_threshold: 200
   points:
     domain: 1
     ip: 3
-    whitelist: 0
+    whitelist: 0.8
     spam: 50
     local_net: 10
     ssh: 15
     suspicious_port: 30
-    flood: 10
   spam_ports:
     - "25"
     - "465"
@@ -270,6 +268,67 @@ whitelist:
     - "87.240."
     - "95.163."
     - "93.186."
+    - "95.213."
+    - "95.142."
+    - "185.32."
+    - "185.89."
+    - "185.116."
+    - "130.49."
+    - "62.217."
+    - "94.100."
+    - "155.212."
+    - "178.237."
+    - "217.16."
+    - "217.20."
+    - "217.69."
+    - "5.61."
+    - "79.137."
+    - "83.166."
+    - "87.239."
+    - "90.156."
+    - "128.140."
+    - "161.104."
+    - "176.112."
+    - "178.22."
+    - "188.93."
+    - "212.233."
+    - "5.101."
+    - "5.181."
+    - "5.188."
+    - "31.177."
+    - "37.139."
+    - "45.84."
+    - "45.136."
+    - "83.217."
+    - "83.222."
+    - "84.23."
+    - "85.192."
+    - "87.242."
+    - "89.208."
+    - "89.221."
+    - "91.219."
+    - "91.231."
+    - "94.139."
+    - "109.120."
+    - "146.185."
+    - "185.5."
+    - "185.16."
+    - "185.86."
+    - "185.100."
+    - "185.130."
+    - "185.131."
+    - "185.180."
+    - "185.226."
+    - "185.241."
+    - "193.203."
+    - "195.211."
+    - "212.111."
+    - "213.219."
+    - "217.174."
+    - "195.218."
+    - "92.38."
+    - "185.187."
+    - "194.186."
 EOF
     success "Конфиг создан: $VPNGUARD_CONFIG"
     return 0
@@ -1075,8 +1134,82 @@ menu_apps() {
 # ═══════════════════════════════════════════════════════════════
 
 do_test_ip_region() {
-    header "Проверка IP Region" "Тесты"
-    bash <(wget -qO- https://ipregion.vrnt.xyz)
+    header "Проверка IP Region — все IPv4" "Тесты"
+
+    local ipregion_script
+    local local_ip
+    local external_ip
+    local tested_count=0
+    local -a local_ips=()
+
+    ipregion_script="$(mktemp)" || {
+        error "Не удалось создать временный файл."
+        press_enter
+        return
+    }
+
+    if ! wget -qO "$ipregion_script" https://ipregion.vrnt.xyz; then
+        error "Не удалось скачать ipregion."
+        rm -f "$ipregion_script"
+        press_enter
+        return
+    fi
+
+    # Получаем все IPv4, назначенные серверу.
+    mapfile -t local_ips < <(
+        ip -o -4 addr show scope global 2>/dev/null |
+        awk '{
+            split($4, address, "/")
+            print address[1]
+        }' |
+        sort -u
+    )
+
+    if (( ${#local_ips[@]} == 0 )); then
+        error "На сервере не найдены IPv4-адреса."
+        rm -f "$ipregion_script"
+        press_enter
+        return
+    fi
+
+    for local_ip in "${local_ips[@]}"; do
+        # Проверяем, может ли этот адрес использоваться для выхода в интернет.
+        external_ip="$(
+            curl -4fsS \
+                --connect-timeout 5 \
+                --max-time 10 \
+                --interface "$local_ip" \
+                https://api.ipify.org 2>/dev/null |
+            tr -d '\r\n'
+        )"
+
+        echo ""
+
+        if [[ -z "$external_ip" ]]; then
+            warn "IP $local_ip не может выйти в интернет — пропускаем."
+            continue
+        fi
+
+        printf "${CYAN}══════════════════════════════════════════════════════${NC}\n"
+        printf "${BOLD}Локальный IP:${NC} %s\n" "$local_ip"
+        printf "${BOLD}Внешний IP:${NC}  %s\n" "$external_ip"
+        printf "${CYAN}══════════════════════════════════════════════════════${NC}\n"
+
+        # Принудительно запускаем ipregion через конкретный IP.
+        bash "$ipregion_script" -4 -i "$local_ip"
+
+        ((tested_count++))
+    done
+
+    rm -f "$ipregion_script"
+
+    echo ""
+    if (( tested_count > 0 )); then
+        success "Проверено IPv4-адресов: $tested_count"
+    else
+        warn "Не найдено IPv4-адресов с доступом в интернет."
+    fi
+
     press_enter
 }
 
