@@ -1134,13 +1134,13 @@ menu_apps() {
 # ═══════════════════════════════════════════════════════════════
 
 do_test_ip_region() {
-    header "Проверка IP Region — все IPv4" "Тесты"
+    header "Проверка IP Region — все внешние IPv4" "Тесты"
 
     local ipregion_script
     local local_ip
     local external_ip
-    local tested_count=0
     local -a local_ips=()
+    local -a tested_external_ips=()
 
     ipregion_script="$(mktemp)" || {
         error "Не удалось создать временный файл."
@@ -1155,10 +1155,10 @@ do_test_ip_region() {
         return
     fi
 
-    # Получаем все IPv4, назначенные серверу.
+    # Получаем все IPv4, назначенные серверу (исключая docker и виртуальные мосты).
     mapfile -t local_ips < <(
         ip -o -4 addr show scope global 2>/dev/null |
-        awk '{
+        awk '$2 !~ /^(docker|br-|veth|lo)/ {
             split($4, address, "/")
             print address[1]
         }' |
@@ -1183,29 +1183,42 @@ do_test_ip_region() {
             tr -d '\r\n'
         )"
 
-        echo ""
-
         if [[ -z "$external_ip" ]]; then
-            warn "IP $local_ip не может выйти в интернет — пропускаем."
             continue
         fi
 
+        # Пропускаем, если этот внешний IP уже проверяли
+        local already_tested=0
+        for prev_ext in "${tested_external_ips[@]}"; do
+            if [[ "$prev_ext" == "$external_ip" ]]; then
+                already_tested=1
+                break
+            fi
+        done
+
+        if (( already_tested )); then
+            continue
+        fi
+
+        tested_external_ips+=("$external_ip")
+
+        echo ""
         printf "${CYAN}══════════════════════════════════════════════════════${NC}\n"
-        printf "${BOLD}Локальный IP:${NC} %s\n" "$local_ip"
+        if [[ "$local_ip" != "$external_ip" ]]; then
+            printf "${BOLD}Локальный IP:${NC} %s\n" "$local_ip"
+        fi
         printf "${BOLD}Внешний IP:${NC}  %s\n" "$external_ip"
         printf "${CYAN}══════════════════════════════════════════════════════${NC}\n"
 
         # Принудительно запускаем ipregion через конкретный IP.
         bash "$ipregion_script" -4 -i "$local_ip"
-
-        ((tested_count++))
     done
 
     rm -f "$ipregion_script"
 
     echo ""
-    if (( tested_count > 0 )); then
-        success "Проверено IPv4-адресов: $tested_count"
+    if (( ${#tested_external_ips[@]} > 0 )); then
+        success "Проверено уникальных внешних IPv4: ${#tested_external_ips[@]}"
     else
         warn "Не найдено IPv4-адресов с доступом в интернет."
     fi
