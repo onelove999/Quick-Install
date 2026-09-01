@@ -15,17 +15,18 @@
 have() { command -v "$1" >/dev/null 2>&1; }
 
 cleanup_diagnostics() {
-    local pids
-    pids=$(jobs -p 2>/dev/null)
-    [ -n "$pids" ] && kill $pids 2>/dev/null || true
-    rm -f "$RES_FILE" "$FINDINGS_FILE" "$SUMMARY_FILE"
+    if [ -n "${DIAG_ACTIVE_PID:-}" ]; then
+        kill "$DIAG_ACTIVE_PID" 2>/dev/null || true
+        wait "$DIAG_ACTIVE_PID" 2>/dev/null || true
+    fi
+    [ -n "${RES_FILE:-}" ] && rm -f "$RES_FILE"
+    [ -n "${FINDINGS_FILE:-}" ] && rm -f "$FINDINGS_FILE"
+    [ -n "${SUMMARY_FILE:-}" ] && rm -f "$SUMMARY_FILE"
 }
 
 interrupted_diagnostics() {
-    echo
-    echo -e "${Y}Прервано пользователем.${NC} Лог: $LOG"
-    cleanup_diagnostics
-    return
+    DIAGNOSTICS_INTERRUPTED=1
+    [ -n "${DIAG_ACTIVE_PID:-}" ] && kill "$DIAG_ACTIVE_PID" 2>/dev/null || true
 }
 
 # severity: 1=info(↓), 2=warn, 3=bad(↑)
@@ -89,10 +90,15 @@ declare -i CHECK_NUM=0
 declare -i CHECK_TOTAL_TIME=0
 declare -i CHECK_DONE=0
 declare -i ETA_AVG=0
+declare -i DIAG_OK=0
+declare -i DIAG_WARN=0
+declare -i DIAG_BAD=0
+declare -i DIAG_SKIP=0
 CHECK_TOTAL=0
 
 run_check() {
     local name=$1 fn=$2
+    [ "${DIAGNOSTICS_INTERRUPTED:-0}" -eq 1 ] && return 130
     CHECK_NUM=$(( CHECK_NUM + 1 ))
 
     {
@@ -107,21 +113,34 @@ run_check() {
         RES_STATUS=ok
         RES_SUMMARY=""
         exec >> "$LOG" 2>&1
-        $fn || true
+        local check_rc=0
+        "$fn" || check_rc=$?
+        if [ "$check_rc" -ne 0 ] && [ -z "$RES_SUMMARY" ]; then
+            RES_STATUS=bad
+            RES_SUMMARY="внутренняя ошибка (код $check_rc)"
+            finding 3 internal "Проверка '$name' завершилась с кодом $check_rc без результата"
+        fi
         printf '%s\n%s\n' "$RES_STATUS" "$RES_SUMMARY" > "$RES_FILE"
     ) &
     local pid=$!
+    DIAG_ACTIVE_PID=$pid
 
     local start frame=0
     start=$(date +%s)
     # Polling каждые ~100ms — спиннер выглядит живым, не дёрганым
-    while kill -0 "$pid" 2>/dev/null; do
+    while kill -0 "$pid" 2>/dev/null && [ "${DIAGNOSTICS_INTERRUPTED:-0}" -eq 0 ]; do
         local el=$(( $(date +%s) - start ))
         print_progress "$CHECK_NUM" "$CHECK_TOTAL" "$name" "$frame" "$el"
         sleep 0.1
         frame=$(( frame + 1 ))
     done
+    [ "${DIAGNOSTICS_INTERRUPTED:-0}" -eq 1 ] && kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
+    DIAG_ACTIVE_PID=""
+
+    if [ "${DIAGNOSTICS_INTERRUPTED:-0}" -eq 1 ]; then
+        return 130
+    fi
 
     local dur=$(( $(date +%s) - start ))
     CHECK_TOTAL_TIME=$(( CHECK_TOTAL_TIME + dur ))
@@ -134,6 +153,12 @@ run_check() {
         su=$(sed -n '2p' "$RES_FILE")
         [ -z "$st" ] && st="ok"
     fi
+    case "$st" in
+        ok) DIAG_OK=$((DIAG_OK + 1)) ;;
+        warn) DIAG_WARN=$((DIAG_WARN + 1)) ;;
+        bad) DIAG_BAD=$((DIAG_BAD + 1)) ;;
+        skip|*) DIAG_SKIP=$((DIAG_SKIP + 1)) ;;
+    esac
     print_line "$CHECK_NUM" "$CHECK_TOTAL" "$(icon_for "$st")" "$name" "$su"
 }
 
@@ -486,11 +511,11 @@ check_tcp_cc() {
         if echo "$avail" | grep -q bbr; then
             RES_STATUS=warn
             RES_SUMMARY="$cc (bbr доступен!)"
-            finding 3 tcp "BBR доступен но не активен — sysctl -w net.ipv4.tcp_congestion_control=bbr"
+            finding 1 tcp "Используется $cc; BBR доступен как опциональная альтернатива, но это не самостоятельная неисправность"
         else
-            RES_STATUS=bad
+            RES_STATUS=warn
             RES_SUMMARY="bbr недоступен"
-            finding 3 tcp "BBR отсутствует в ядре — обнови ядро"
+            finding 1 tcp "BBR отсутствует в списке доступных алгоритмов; cubic остаётся рабочим вариантом"
         fi
     fi
     case "$qdisc" in
@@ -626,6 +651,13 @@ check_pmtu() {
         [ "${recv:-0}" -ge 1 ]
     }
 
+    if ! ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then
+        RES_STATUS=skip
+        RES_SUMMARY="ICMP недоступен — PMTU не измерен"
+        summary_kv "PMTU" "не измерен"
+        return
+    fi
+
     echo "ping -M do -s 1472 → 1.1.1.1 (3 пакета)"
     if pmtu_probe 1472; then
         RES_STATUS=ok
@@ -669,31 +701,29 @@ check_loss() {
             }
         }'
     }
-    local g_loss=0 g_loss_avg=0 cnt=0
-    for host in 8.8.8.8 1.1.1.1 9.9.9.9; do
-        local out loss
-        out=$(ping -c 10 -W 2 -i 0.2 -q "$host" 2>/dev/null)
-        loss=$(parse_loss "$out")
-        echo "  $host loss=${loss:-?}%"
-    done
-    for host in www.google.com youtube.com googlevideo.com; do
+    local g_loss=0 failed_targets=0 measured=0
+    for host in 8.8.8.8 1.1.1.1 9.9.9.9 www.google.com youtube.com googlevideo.com; do
         local out loss rtt
         out=$(ping -c 10 -W 2 -i 0.2 -q "$host" 2>/dev/null)
         loss=$(parse_loss "$out")
         rtt=$(echo "$out"  | awk -F'/' '/rtt|round-trip/ {printf "%.0f", $5}')
         echo "  $host loss=${loss:-?}% avg=${rtt:-?}ms"
-        if [ -n "$loss" ] && [ "$loss" -gt 0 ]; then
-            g_loss_avg=$((g_loss_avg + loss))
-            cnt=$((cnt + 1))
+        if [ -z "$loss" ]; then
+            failed_targets=$((failed_targets + 1))
+            continue
         fi
+        measured=$((measured + 1))
         [ "${loss:-0}" -gt "$g_loss" ] && g_loss=$loss
     done
 
     summary_kv "Loss до Google" "max ${g_loss}%"
 
     RES_STATUS=ok
-    RES_SUMMARY="max ${g_loss}% loss"
-    if [ "$g_loss" -ge 5 ]; then
+    RES_SUMMARY="max ${g_loss}% loss · ${failed_targets} без ответа"
+    if [ "$measured" -eq 0 ] || [ "$failed_targets" -ge 3 ]; then
+        RES_STATUS=bad
+        finding 3 loss "Не отвечают ${failed_targets} из 6 контрольных адресов — ICMP заблокирован или сеть/DNS недоступны"
+    elif [ "$g_loss" -ge 5 ]; then
         RES_STATUS=bad
         finding 3 loss "Потери до Google до ${g_loss}% — TCP retransmits, видео фризит. Проблема пиринга провайдера"
     elif [ "$g_loss" -gt 0 ]; then
@@ -705,7 +735,7 @@ check_loss() {
 # 11. MTR — ищем худший хоп
 check_mtr() {
     have mtr || { RES_STATUS=skip; RES_SUMMARY="mtr недоступен"; return; }
-    local out worst_loss worst_hop hops_total
+    local out worst_loss hops_total final_loss final_hop
     out=$(mtr -r -c 15 -n youtube.com 2>/dev/null)
     echo "$out"
     # mtr-строка: "  3.|-- 100.64.120.0   0.0%  15  ..."
@@ -718,74 +748,73 @@ check_mtr() {
             if ($3+0 > max) { max=$3+0; hop=$2"/"$3"%" }
         }
         END { print hop }')
+    final_hop=$(echo "$out" | awk '/^ *[0-9]+\.[|]/ {line=$0} END {print line}')
+    final_loss=$(echo "$final_hop" | awk '{gsub("%","",$3); print $3+0}')
 
     echo
     echo "--- mtr → googlevideo.com ---"
     mtr -r -c 15 -n googlevideo.com 2>/dev/null
 
-    summary_kv "Маршрут" "$hops_total hops · max loss $worst_loss"
+    summary_kv "Маршрут" "$hops_total hops · endpoint loss ${final_loss:-?}%"
 
     RES_STATUS=ok
     RES_SUMMARY="$hops_total hops"
-    local worst_pct
-    worst_pct=$(echo "$worst_loss" | awk -F'/' '{gsub("%","",$2); print $2+0}')
-    if [ -n "$worst_pct" ] && [ "$worst_pct" -ge 30 ]; then
+    if [ -n "$final_loss" ] && [ "$final_loss" -ge 30 ]; then
         RES_STATUS=bad
-        RES_SUMMARY="${hops_total}h · loss ${worst_pct}% на $worst_loss"
-        finding 3 route "На пути к YouTube хоп с потерями $worst_loss — это битый пиринг ASN"
-    elif [ -n "$worst_pct" ] && [ "$worst_pct" -ge 10 ]; then
+        RES_SUMMARY="${hops_total}h · endpoint loss ${final_loss}%"
+        finding 3 route "Конечный узел MTR теряет ${final_loss}% пакетов; потери промежуточных хопов отдельно не считаются неисправностью"
+    elif [ -n "$final_loss" ] && [ "$final_loss" -ge 10 ]; then
         RES_STATUS=warn
-        RES_SUMMARY="${hops_total}h · loss ${worst_pct}% на $worst_loss"
-        finding 2 route "Хоп с потерями $worst_loss — стоит сообщить хостеру"
+        RES_SUMMARY="${hops_total}h · endpoint loss ${final_loss}%"
+        finding 2 route "На конечном узле MTR наблюдается ${final_loss}% потерь"
+    elif [ -n "$worst_loss" ]; then
+        echo "Потери на промежуточных хопах ($worst_loss) не учитываются без потерь на конечном узле."
     fi
 }
 
 # 12. UDP / QUIC / HTTP/3
 check_quic() {
-    local udp_ok=0 h3_ok=0
-    if have nc; then
-        timeout 3 nc -u -z 8.8.8.8 443 >/dev/null 2>&1 && udp_ok=1
+    local h3_ok=0
+    if ! curl --help all 2>/dev/null | grep -q -- '--http3-only'; then
+        RES_STATUS=skip
+        RES_SUMMARY="curl собран без HTTP/3"
+        summary_kv "QUIC/HTTP3" "не проверен"
+        return
     fi
-    echo "UDP/443 → 8.8.8.8: $([ $udp_ok -eq 1 ] && echo OK || echo FAIL)"
-
-    if curl --help all 2>/dev/null | grep -q -- '--http3'; then
-        if curl --http3 -sS -o /dev/null --max-time 6 https://www.youtube.com >/dev/null 2>&1; then
-            h3_ok=1
-            echo "HTTP/3 youtube.com: OK"
-        fi
+    if curl --http3-only -sS -o /dev/null --max-time 8 https://www.youtube.com >/dev/null 2>&1; then
+        h3_ok=1
     fi
-
-    summary_kv "QUIC/HTTP3" "udp=$([ $udp_ok = 1 ] && echo on || echo off) http3=$([ $h3_ok = 1 ] && echo on || echo off)"
-
-    RES_STATUS=ok
-    RES_SUMMARY="udp ok"
-    if [ $udp_ok -eq 0 ]; then
+    echo "HTTP/3 youtube.com: $([ "$h3_ok" -eq 1 ] && echo OK || echo FAIL)"
+    summary_kv "QUIC/HTTP3" "$([ "$h3_ok" -eq 1 ] && echo on || echo off)"
+    if [ "$h3_ok" -eq 1 ]; then
+        RES_STATUS=ok
+        RES_SUMMARY="HTTP/3 доступен"
+    else
         RES_STATUS=warn
-        RES_SUMMARY="UDP/443 заблокирован?"
-        finding 2 quic "UDP/443 не проходит — клиенты валятся на TCP, шортсы дольше стартуют"
-    fi
-    if [ $h3_ok -eq 0 ] && curl --help all 2>/dev/null | grep -q -- '--http3'; then
-        finding 1 quic "curl --http3 не отвечает — QUIC до Google ослаб"
+        RES_SUMMARY="HTTP/3 не установился"
+        finding 2 quic "Реальное HTTP/3-соединение не установилось; UDP-проверка через nc не используется как недостоверная"
     fi
 }
 
 # 13. Скорость: одиночный поток (Cachefly 100 МБ)
 check_speed_single() {
-    local out spd_bps spd_mbit code size
+    local out spd_bps spd_mbit code size size_int curl_rc=0
     out=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 12 \
         -w "%{speed_download}|%{size_download}|%{time_total}|%{http_code}" \
-        "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || out=""
+        "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || curl_rc=$?
     echo "raw: $out"
     spd_bps=$(echo "$out" | cut -d'|' -f1)
     size=$(echo    "$out" | cut -d'|' -f2)
+    size_int=${size%%.*}
+    size_int=${size_int:-0}
     code=$(echo    "$out" | cut -d'|' -f4)
     # curl при таймауте отдаёт "0.000" — приводим к целому
     local spd_int
     spd_int=$(printf '%.0f' "${spd_bps:-0}" 2>/dev/null || echo 0)
-    if [ -z "$spd_bps" ] || [ "${spd_int:-0}" -lt 10000 ]; then
+    if [ -z "$spd_bps" ] || [ "${spd_int:-0}" -lt 10000 ] || [ "$size_int" -lt 500000 ] || [[ "$code" != 200 && "$code" != 206 ]]; then
         RES_STATUS=bad
         RES_SUMMARY="fail (size=${size:-?}, http=${code:-?})"
-        finding 3 speed "Cachefly 100MB не докачался (${size:-0} bytes, http=${code:-?}) — канал/блокировка"
+        finding 3 speed "Cachefly не передал достаточно данных (${size:-0} bytes, http=${code:-?}, curl=$curl_rc)"
         summary_kv "Speed (1-flow)" "fail"
         return
     fi
@@ -823,13 +852,14 @@ check_speed_4flow() {
         [ "$running" = "0" ] && break
         sleep 1
     done
+    local end
+    end=$(date +%s)
     for p in "${PIDS[@]}"; do kill -TERM "$p" 2>/dev/null || true; done
     sleep 1
     for p in "${PIDS[@]}"; do kill -KILL "$p" 2>/dev/null || true; done
     for p in "${PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
 
-    local end dur total=0 sz
-    end=$(date +%s)
+    local dur total=0 sz
     dur=$(( end - start )); [ "$dur" -lt 1 ] && dur=1
     for f in "$tmpd"/d*; do
         [ -f "$f" ] || continue
@@ -866,11 +896,10 @@ check_bufferbloat() {
     echo "baseline avg: ${base:-?} ms"
 
     # Считаем сколько реально скачали — иначе тест без нагрузки бессмысленен
-    local size_file
-    size_file=$(mktemp)
-    ( curl "${CURL_FLAGS[@]}" --max-time 12 -sS -o /dev/null \
-        -w "%{size_download}" "https://cachefly.cachefly.net/100mb.test" \
-        > "$size_file" 2>/dev/null ) &
+    local load_file
+    load_file=$(mktemp)
+    ( curl "${CURL_FLAGS[@]}" --max-time 12 -sS -o "$load_file" \
+        "https://cachefly.cachefly.net/100mb.test" >/dev/null 2>&1 ) &
     local DL=$!
     sleep 1
     under=$(ping -c 12 -i 0.2 -W 2 -q 1.1.1.1 2>/dev/null | awk -F'/' '/rtt|round-trip/ {print $5}')
@@ -882,8 +911,8 @@ check_bufferbloat() {
     wait "$DL" 2>/dev/null || true
 
     local downloaded
-    downloaded=$(cat "$size_file" 2>/dev/null || echo 0)
-    rm -f "$size_file"
+    downloaded=$(stat -c '%s' "$load_file" 2>/dev/null || echo 0)
+    rm -f "$load_file"
     echo "under load avg: ${under:-?} ms · downloaded ${downloaded} bytes"
 
     # Если download не дошёл хотя бы до 5 МБ — линк не нагрузился, мерять нечего
@@ -944,7 +973,7 @@ check_variance() {
     for i in 1 2 3 4 5; do
         local spd spd_int
         spd=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 5 \
-            -w "%{speed_download}" "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || spd="0"
+            -w "%{speed_download}" "https://cachefly.cachefly.net/100mb.test" 2>/dev/null) || true
         spd_int=$(printf '%.0f' "${spd:-0}" 2>/dev/null || echo 0)
         if [ -z "$spd" ] || [ "${spd_int:-0}" -lt 10000 ]; then
             fails=$((fails+1))
@@ -1096,7 +1125,7 @@ check_services() {
         ttfb=$(echo "${out##*|}" | awk '{printf "%.0f", $1 * 1000}')
 
         case "$code" in
-            200|301|302|307|308|401)
+            2??|3??|400|401|404)
                 ok_count=$((ok_count+1))
                 if [ "${ttfb:-0}" -gt 2000 ]; then
                     slow=$((slow+1))
@@ -1167,7 +1196,8 @@ check_cdn_multi() {
         local spd code
         local out
         out=$(curl "${CURL_FLAGS[@]}" -sS -o /dev/null --max-time 8 \
-            -w "%{speed_download}|%{http_code}" "$url" 2>/dev/null) || out="0|000"
+            -w "%{speed_download}|%{http_code}" "$url" 2>/dev/null) || true
+        [ -n "$out" ] || out="0|000"
         spd=${out%%|*}
         code=${out##*|}
         # curl возвращает "0.000" при таймауте/ошибке — нормализуем к целому
@@ -1259,7 +1289,7 @@ check_ip_rep() {
     echo "Google search test: code=$g_code url=$g_url"
 
     local captcha_hit=0
-    if echo "$g_url" | grep -qE 'sorry/|/sorry|captcha'; then
+    if [ "$g_code" = "429" ] || echo "$g_url" | grep -qE 'sorry/|/sorry|captcha'; then
         captcha_hit=1
     fi
 
@@ -1346,17 +1376,31 @@ generate_diagnostic_report() {
     echo
     echo -e "${DIM}  ─────────────────────────────────  ИТОГО  ─────────────────────────────────${NC}"
     echo
+
+    if [ -s "$SUMMARY_FILE" ]; then
+        echo -e "  ${BOLD}Сводка${NC}"
+        while IFS='|' read -r key value; do
+            printf "    ${DIM}%-18s${NC} %s\n" "$key" "$value"
+        done < "$SUMMARY_FILE"
+        echo
+    fi
+    printf "  Проверки: ${G}%d успешно${NC} · ${Y}%d предупреждений${NC} · ${R}%d ошибок${NC} · ${DIM}%d пропущено${NC}\n\n" \
+        "$DIAG_OK" "$DIAG_WARN" "$DIAG_BAD" "$DIAG_SKIP"
     
     # Вердикт
     local verdict_icon="" verdict_color="" verdict_text="" verdict_sub=""
-    if [ "$bad_count" = "0" ] && [ "$warn_count" = "0" ]; then
+    if [ "$DIAG_OK" -eq 0 ] || [ "$DIAG_SKIP" -ge $(( (CHECK_TOTAL + 1) / 2 )) ]; then
+        verdict_icon="?"; verdict_color=$Y
+        verdict_text="недостаточно данных"
+        verdict_sub="слишком много проверок пропущено; итоговая оценка недостоверна"
+    elif [ "$bad_count" = "0" ] && [ "$warn_count" = "0" ] && [ "$DIAG_BAD" -eq 0 ] && [ "$DIAG_WARN" -eq 0 ]; then
         verdict_icon="✓"; verdict_color=$G
         verdict_text="нода в порядке"
         verdict_sub="видео и сервисы должны работать без проблем"
     elif [ "$bad_count" = "0" ]; then
         verdict_icon="⚠"; verdict_color=$Y
         verdict_text="рабочее с замечаниями"
-        verdict_sub="$warn_count предупреждений · поедет, но не идеально"
+        verdict_sub="проверок с предупреждением: $DIAG_WARN · рекомендаций: $warn_count"
     elif [ "$bad_count" -le 1 ]; then
         verdict_icon="⚠"; verdict_color=$Y
         verdict_text="проблемы есть"
@@ -1424,11 +1468,32 @@ do_run_diagnostics() {
     header "Комплексная диагностика ноды" "Тесты и Бенчмарки"
     
     # Init temp files and traps
-    LOG="/tmp/node-diagnostic-$(date +%Y%m%d-%H%M%S).log"
+    local previous_exit previous_int previous_term
+    previous_exit=$(trap -p EXIT)
+    previous_int=$(trap -p INT)
+    previous_term=$(trap -p TERM)
+    LOG=$(mktemp /tmp/node-diagnostic.XXXXXX.log)
     RES_FILE=$(mktemp)
     FINDINGS_FILE=$(mktemp)
     SUMMARY_FILE=$(mktemp)
-    
+    if [ -z "$LOG" ] || [ -z "$RES_FILE" ] || [ -z "$FINDINGS_FILE" ] || [ -z "$SUMMARY_FILE" ]; then
+        error "Не удалось создать временные файлы диагностики."
+        cleanup_diagnostics
+        press_enter
+        return 1
+    fi
+
+    DIAGNOSTICS_INTERRUPTED=0
+    DIAG_ACTIVE_PID=""
+    CHECK_NUM=0
+    CHECK_TOTAL_TIME=0
+    CHECK_DONE=0
+    ETA_AVG=0
+    DIAG_OK=0
+    DIAG_WARN=0
+    DIAG_BAD=0
+    DIAG_SKIP=0
+
     trap cleanup_diagnostics EXIT
     trap interrupted_diagnostics INT TERM
     
@@ -1500,13 +1565,26 @@ ${CLR_LINE}  ${DIM}Лог: $LOG${NC}"
     for entry in "${EFFECTIVE_CHECKS[@]}"; do
         local name=${entry%:*}
         local fn=${entry##*:}
-        run_check "$name" "$fn"
+        if ! run_check "$name" "$fn"; then
+            break
+        fi
     done
     local DIAG_DURATION=$(( $(date +%s) - DIAG_START ))
     echo -e "  ${DIM}Прогон занял ${DIAG_DURATION}s${NC}"
 
-    # 4. Отчет и рекомендации
-    generate_diagnostic_report
+    if [ "$DIAGNOSTICS_INTERRUPTED" -eq 1 ]; then
+        echo ""
+        warn "Диагностика прервана пользователем. Лог сохранён: $LOG"
+    else
+        # 4. Отчет и рекомендации
+        generate_diagnostic_report
+    fi
 
     press_enter
+    cleanup_diagnostics
+    trap - EXIT INT TERM
+    [ -n "$previous_exit" ] && eval "$previous_exit"
+    [ -n "$previous_int" ] && eval "$previous_int"
+    [ -n "$previous_term" ] && eval "$previous_term"
+    [ "$DIAGNOSTICS_INTERRUPTED" -eq 0 ]
 }

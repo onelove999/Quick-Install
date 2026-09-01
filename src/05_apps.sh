@@ -599,16 +599,11 @@ do_install_beszel() {
     header "Установка Beszel Agent" "Мониторинг"
 
     # 1. Docker
-    if ! command -v docker &>/dev/null; then
-        info "Установка Docker..."
-        curl -fsSL https://get.docker.com | sh
-        success "Docker установлен."
-    fi
+    ensure_docker || { error "Без Docker установка Beszel невозможна."; press_enter; return 1; }
 
     # 2. Создание папки
     local BESZEL_DIR="/opt/beszel"
     mkdir -p "$BESZEL_DIR"
-    cd "$BESZEL_DIR" || return
     info "Папка $BESZEL_DIR создана."
 
     # 0. Проверка запущенного контейнера
@@ -623,7 +618,7 @@ do_install_beszel() {
     fi
 
     # 3. Настройка docker-compose.yml
-    if [ -f "docker-compose.yml" ]; then
+    if [ -f "$BESZEL_DIR/docker-compose.yml" ]; then
         warn "Файл docker-compose.yml уже существует в $BESZEL_DIR."
         read -rp "$(printf "${YELLOW}Перезаписать/Редактировать его? [y/N]: ${NC}")" overwrite
         if [[ ! "$overwrite" =~ ^[Yy]$ ]]; then
@@ -634,21 +629,33 @@ do_install_beszel() {
     fi
     info "Сейчас откроется nano для создания docker-compose.yml"
     info "Вставьте ваш конфиг (с KEY) и сохраните (Ctrl+O, Enter, Ctrl+X)"
-    sleep 2
-    nano docker-compose.yml
+    require_commands nano || { press_enter; return 1; }
+    cp -p "$BESZEL_DIR/docker-compose.yml" "$BESZEL_DIR/docker-compose.yml.bak" 2>/dev/null || true
+    chmod 0600 "$BESZEL_DIR/docker-compose.yml.bak" 2>/dev/null || true
+    sleep 1
+    nano "$BESZEL_DIR/docker-compose.yml"
+    chmod 0600 "$BESZEL_DIR/docker-compose.yml" 2>/dev/null || true
 
-    if [ ! -s docker-compose.yml ]; then
+    if [ ! -s "$BESZEL_DIR/docker-compose.yml" ]; then
         warn "docker-compose.yml пуст. Установка прервана."
         press_enter
         return
+    fi
+    if ! compose_validate "$BESZEL_DIR"; then
+        [ -f "$BESZEL_DIR/docker-compose.yml.bak" ] && cp -p "$BESZEL_DIR/docker-compose.yml.bak" "$BESZEL_DIR/docker-compose.yml"
+        error "Compose-конфигурация некорректна; предыдущая версия восстановлена."
+        press_enter
+        return 1
     fi
 
     # 4. Настройка UFW
     echo ""
     read -rp "$(printf "${CYAN}Введите IP-адрес Beszel Hub для доступа к порту 45876: ${NC}")" hub_ip
     if [ -n "$hub_ip" ]; then
+        if ! is_valid_ip "$hub_ip"; then error "Некорректный IPv4-адрес Hub."; press_enter; return 1; fi
+        if ! command -v ufw &>/dev/null; then error "UFW не установлен; правило доступа не добавлено."; press_enter; return 1; fi
         info "Разрешаем доступ к порту 45876 для $hub_ip..."
-        ufw allow from "$hub_ip" to any port 45876 proto tcp
+        ufw allow from "$hub_ip" to any port 45876 proto tcp || { error "Не удалось добавить правило UFW."; press_enter; return 1; }
         success "Доступ разрешен."
     else
         warn "IP не введен. Порт 45876 не открыт автоматически."
@@ -656,15 +663,18 @@ do_install_beszel() {
 
     # 5. Запуск
     info "Запуск контейнера Beszel Agent..."
-    docker compose up -d
-    success "Beszel Agent запущен."
+    if compose_run "$BESZEL_DIR" up -d; then
+        success "Beszel Agent запущен."
+    else
+        error "Не удалось запустить Beszel Agent."
+    fi
     press_enter
 }
 
 do_uninstall_warp() {
     header "Удаление Cloudflare WARP" "Сервисы"
-    read -rp "$(printf "${YELLOW}Удалить WARP полностью? [y/N]: ${NC}")" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    local mode=${1:-interactive}
+    if [ "$mode" = "interactive" ] && ! confirm_action "Удалить WARP полностью"; then
         info "Отменено."
         press_enter
         return
@@ -680,17 +690,15 @@ do_uninstall_warp() {
     info "Удаление файлов и пакетов..."
     rm -f /etc/wireguard/warp.conf /etc/wireguard/wgcf-account.toml
     rm -f /usr/local/bin/wgcf
-    rm -f wgcf-profile.conf wgcf-account.toml 2>/dev/null
 
     # Пакет wireguard удаляем только если пользователь уверен (может использоваться другими)
-    read -rp "$(printf "${YELLOW}Удалить пакет wireguard? [y/N]: ${NC}")" rm_wg
-    if [[ "$rm_wg" =~ ^[Yy]$ ]]; then
+    if [ "$mode" = "interactive" ] && confirm_action "Удалить пакет wireguard (может использоваться другими сервисами)"; then
         apt-get remove --purge -y wireguard
         apt-get autoremove -y
     fi
 
     success "WARP удалён."
-    press_enter
+    [ "$mode" = "interactive" ] && press_enter
 }
 
 do_install_warp() {
@@ -699,14 +707,18 @@ do_install_warp() {
     # 1. Проверка установки
     if command -v wgcf >/dev/null 2>&1 && [ -f "/etc/wireguard/warp.conf" ]; then
         warn "WARP уже установлен."
-        read -rp "$(printf "${YELLOW}Переустановить? [y/N]: ${NC}")" reinst
-        if [[ ! "$reinst" =~ ^[Yy]$ ]]; then return; fi
-        do_uninstall_warp
+        if ! confirm_action "Переустановить WARP"; then return; fi
+        do_uninstall_warp reinstall || return 1
+        [ -f /etc/wireguard/warp.conf ] && { error "Старый WARP не удалён."; press_enter; return 1; }
     fi
 
     # 2. Установка WireGuard
     info "Установка WireGuard..."
-    measure_time bash -c "apt-get update -qq && apt-get install -y wireguard wget curl jq"
+    if ! measure_time bash -c "apt-get update -qq && apt-get install -y wireguard wget curl jq"; then
+        error "Не удалось установить зависимости WARP."
+        press_enter
+        return 1
+    fi
     
     # 3. Скачивание wgcf
     info "Скачивание wgcf..."
@@ -715,57 +727,69 @@ do_install_warp() {
     case $ARCH in
         x86_64) WGCF_ARCH="amd64" ;;
         aarch64|arm64) WGCF_ARCH="arm64" ;;
-        *) WGCF_ARCH="amd64" ;;
+        *) error "Архитектура $ARCH не поддерживается wgcf."; press_enter; return 1 ;;
     esac
     
     WGCF_RELEASE_URL="https://api.github.com/repos/ViRb3/wgcf/releases/latest"
-    WGCF_VERSION=$(curl -s "$WGCF_RELEASE_URL" | jq -r .tag_name)
+    WGCF_VERSION=$(curl -fsSL "$WGCF_RELEASE_URL" | jq -r '.tag_name // empty')
+    if [ -z "$WGCF_VERSION" ]; then error "Не удалось определить версию wgcf."; press_enter; return 1; fi
     WGCF_DOWNLOAD_URL="https://github.com/ViRb3/wgcf/releases/download/${WGCF_VERSION}/wgcf_${WGCF_VERSION#v}_linux_${WGCF_ARCH}"
     
-    wget -q "$WGCF_DOWNLOAD_URL" -O /usr/local/bin/wgcf
+    if ! download_atomic "$WGCF_DOWNLOAD_URL" /usr/local/bin/wgcf; then error "Не удалось скачать wgcf."; press_enter; return 1; fi
     chmod +x /usr/local/bin/wgcf
     success "wgcf установлен."
 
     # 4. Регистрация и генерация
     info "Регистрация аккаунта WARP..."
-    yes | wgcf register
-    wgcf generate
+    local wgcf_workdir
+    wgcf_workdir=$(mktemp -d /tmp/qi-wgcf.XXXXXX) || { error "Не удалось создать временный каталог."; press_enter; return 1; }
+    if ! (cd "$wgcf_workdir" && yes | wgcf register && wgcf generate); then
+        rm -rf "$wgcf_workdir"
+        error "Регистрация или генерация профиля WARP завершилась ошибкой."
+        press_enter
+        return 1
+    fi
     
-    if [ ! -f "wgcf-profile.conf" ]; then
+    if [ ! -f "$wgcf_workdir/wgcf-profile.conf" ]; then
+        rm -rf "$wgcf_workdir"
         error "Не удалось сгенерировать конфиг wgcf-profile.conf"
         press_enter
-        return
+        return 1
     fi
 
     # 5. Оптимизация конфига для сервера
     info "Настройка конфигурации (Table = off)..."
     # Удаляем DNS из конфига, чтобы не сломать системный резолвер
-    sed -i '/^DNS =/d' "wgcf-profile.conf"
+    sed -i '/^DNS =/d' "$wgcf_workdir/wgcf-profile.conf"
     # Добавляем Table = off, чтобы не перехватывать ВЕСЬ трафик (опасно для SSH)
-    if ! grep -q "Table = off" "wgcf-profile.conf"; then
-        sed -i '/^MTU =/a Table = off' "wgcf-profile.conf"
+    if ! grep -q "Table = off" "$wgcf_workdir/wgcf-profile.conf"; then
+        sed -i '/^MTU =/a Table = off' "$wgcf_workdir/wgcf-profile.conf"
     fi
     # Добавляем Keepalive
-    if ! grep -q "PersistentKeepalive" "wgcf-profile.conf"; then
-        sed -i '/^Endpoint =/a PersistentKeepalive = 25' "wgcf-profile.conf"
+    if ! grep -q "PersistentKeepalive" "$wgcf_workdir/wgcf-profile.conf"; then
+        sed -i '/^Endpoint =/a PersistentKeepalive = 25' "$wgcf_workdir/wgcf-profile.conf"
     fi
 
     # 6. IPv6 Check
     if ! (sysctl net.ipv6.conf.all.disable_ipv6 | grep -q ' = 0'); then
         info "IPv6 отключен в системе, удаляем его из конфига WARP..."
-        sed -i 's/,\s*[0-9a-fA-F:]\+\/128//' "wgcf-profile.conf"
-        sed -i '/Address = [0-9a-fA-F:]\+\/128/d' "wgcf-profile.conf"
+        sed -i 's/,\s*[0-9a-fA-F:]\+\/128//' "$wgcf_workdir/wgcf-profile.conf"
+        sed -i '/Address = [0-9a-fA-F:]\+\/128/d' "$wgcf_workdir/wgcf-profile.conf"
     fi
 
     # 7. Установка конфига
     mkdir -p /etc/wireguard
-    mv "wgcf-profile.conf" /etc/wireguard/warp.conf
-    mv "wgcf-account.toml" /etc/wireguard/wgcf-account.toml 2>/dev/null || true
+    install -m 0600 "$wgcf_workdir/wgcf-profile.conf" /etc/wireguard/warp.conf
+    [ -f "$wgcf_workdir/wgcf-account.toml" ] && install -m 0600 "$wgcf_workdir/wgcf-account.toml" /etc/wireguard/wgcf-account.toml
+    rm -rf "$wgcf_workdir"
     
     # 8. Запуск
     info "Запуск интерфейса warp..."
-    systemctl enable wg-quick@warp
-    systemctl start wg-quick@warp
+    if ! systemctl enable --now wg-quick@warp; then
+        error "Не удалось запустить wg-quick@warp."
+        press_enter
+        return 1
+    fi
     
     # 9. Проверка
     info "Проверка статуса..."
@@ -783,14 +807,14 @@ do_install_warp() {
 menu_warp() {
     while true; do
         clear
-        header "Cloudflare WARP" "Приложения"
-        printf "${BOLD}  1)${NC} Установить WARP\n"
-        printf "${BOLD}  2)${NC} Удалить WARP\n"
-        printf "${BOLD}  3)${NC} Показать статус (wg show)\n"
-        printf "${BOLD}  4)${NC} Перезапустить WARP\n"
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        header "Cloudflare WARP" "Сервисы"
+        menu_section "Управление"
+        menu_item 1 "Установить или переустановить WARP"
+        menu_item 2 "Удалить WARP"
+        menu_item 3 "Показать статус"
+        menu_item 4 "Перезапустить WARP"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_install_warp ;;
@@ -805,6 +829,7 @@ menu_warp() {
 
 do_install_adguard() {
     header "Установка AdGuard Home" "Сервисы"
+    ensure_docker || { error "Без Docker установка AdGuard Home невозможна."; press_enter; return 1; }
 
     # 0. Проверка существующей установки
     if [ -d "$AGH_DIR" ] || (command -v docker &>/dev/null && docker ps -a --format '{{.Names}}' | grep -q "^adguardhome$"); then
@@ -830,16 +855,25 @@ do_install_adguard() {
     
     # 2. Создание docker-compose.yml
     info "Создание docker-compose.yml..."
+    local docker_bridge_ip
+    docker_bridge_ip=$(docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null)
+    if ! is_valid_ip "$docker_bridge_ip"; then
+        error "Не удалось определить IPv4 gateway стандартной Docker-сети bridge."
+        press_enter
+        return 1
+    fi
+    [ -f "${AGH_DIR}/docker-compose.yml" ] && cp -p "${AGH_DIR}/docker-compose.yml" "${AGH_DIR}/docker-compose.yml.bak"
+    chmod 0600 "${AGH_DIR}/docker-compose.yml.bak" 2>/dev/null || true
     cat > "${AGH_DIR}/docker-compose.yml" <<EOF
 services:
   adguardhome:
-    image: adguard/adguardhome
+    image: adguard/adguardhome:latest
     container_name: adguardhome
     restart: unless-stopped
     ports:
       # DNS выводим в сеть Docker (чтобы Xray его увидел)
-      - "172.17.0.1:5353:53/tcp"
-      - "172.17.0.1:5353:53/udp"
+      - "${docker_bridge_ip}:5353:53/tcp"
+      - "${docker_bridge_ip}:5353:53/udp"
       # Порт для мастера первоначальной настройки (скрыт от интернета)
       - "127.0.0.1:3000:3000/tcp"
       # Порт для самой веб-панели (скрыт от интернета)
@@ -848,52 +882,78 @@ services:
       - ./workdir:/opt/adguardhome/work
       - ./confdir:/opt/adguardhome/conf
 EOF
+    chmod 0600 "${AGH_DIR}/docker-compose.yml"
 
     # 3. Редактирование AdGuardHome.yaml
     info "Сейчас откроется nano для редактирования AdGuardHome.yaml"
     info "Вставьте ваш конфиг и сохраните (Ctrl+O, Enter, Ctrl+X)"
-    sleep 2
+    require_commands nano || { press_enter; return 1; }
+    [ -f "${AGH_DIR}/confdir/AdGuardHome.yaml" ] && cp -p "${AGH_DIR}/confdir/AdGuardHome.yaml" "${AGH_DIR}/confdir/AdGuardHome.yaml.bak"
+    chmod 0600 "${AGH_DIR}/confdir/AdGuardHome.yaml.bak" 2>/dev/null || true
+    sleep 1
     nano "${AGH_DIR}/confdir/AdGuardHome.yaml"
+    chmod 0600 "${AGH_DIR}/confdir/AdGuardHome.yaml" 2>/dev/null || true
+
+    if [ ! -s "${AGH_DIR}/confdir/AdGuardHome.yaml" ]; then
+        [ -f "${AGH_DIR}/confdir/AdGuardHome.yaml.bak" ] && cp -p "${AGH_DIR}/confdir/AdGuardHome.yaml.bak" "${AGH_DIR}/confdir/AdGuardHome.yaml"
+        error "Конфигурация пуста; предыдущий файл восстановлен."
+        press_enter
+        return 1
+    fi
+    if ! compose_validate "$AGH_DIR"; then
+        [ -f "${AGH_DIR}/docker-compose.yml.bak" ] && cp -p "${AGH_DIR}/docker-compose.yml.bak" "${AGH_DIR}/docker-compose.yml"
+        error "Compose-конфигурация AdGuard некорректна."
+        press_enter
+        return 1
+    fi
 
     # 4. Запуск
     info "Запуск контейнера..."
-    cd "${AGH_DIR}" && docker compose up -d
-    
-    success "AdGuard Home установлен и запущен."
+    if compose_run "$AGH_DIR" up -d; then
+        success "AdGuard Home установлен и запущен."
+    else
+        error "Не удалось запустить AdGuard Home."
+    fi
     press_enter
 }
 
 do_start_adguard() {
-    header "Запуск AdGuard Home"
-    cd "${AGH_DIR}" && docker compose up -d
-    success "Выполнено."
+    header "Запуск AdGuard Home" "Сервисы > AdGuard Home"
+    if compose_run "$AGH_DIR" up -d; then success "Выполнено."; else error "Не удалось запустить AdGuard Home."; fi
     press_enter
 }
 
 do_stop_adguard() {
-    header "Остановка AdGuard Home"
-    cd "${AGH_DIR}" && docker compose stop
-    success "Выполнено."
+    header "Остановка AdGuard Home" "Сервисы > AdGuard Home"
+    if compose_run "$AGH_DIR" stop; then success "Выполнено."; else error "Не удалось остановить AdGuard Home."; fi
     press_enter
 }
 
 do_restart_adguard() {
-    header "Перезапуск AdGuard Home"
-    cd "${AGH_DIR}" && docker compose restart
-    success "Выполнено."
+    header "Перезапуск AdGuard Home" "Сервисы > AdGuard Home"
+    if compose_run "$AGH_DIR" restart; then success "Выполнено."; else error "Не удалось перезапустить AdGuard Home."; fi
     press_enter
 }
 
 do_logs_adguard() {
-    header "Логи AdGuard Home"
-    cd "${AGH_DIR}" && docker compose logs -f --tail=100
+    header "Логи AdGuard Home" "Сервисы > AdGuard Home"
+    compose_run "$AGH_DIR" logs -f --tail=100
 }
 
 do_edit_adguard_yaml() {
-    header "Редактирование AdGuardHome.yaml"
+    header "Редактирование AdGuardHome.yaml" "Сервисы > AdGuard Home"
     if [ -f "${AGH_DIR}/confdir/AdGuardHome.yaml" ]; then
+        require_commands nano || { press_enter; return 1; }
+        cp -p "${AGH_DIR}/confdir/AdGuardHome.yaml" "${AGH_DIR}/confdir/AdGuardHome.yaml.bak"
+        chmod 0600 "${AGH_DIR}/confdir/AdGuardHome.yaml.bak" 2>/dev/null || true
         nano "${AGH_DIR}/confdir/AdGuardHome.yaml"
-        success "Редактирование завершено."
+        chmod 0600 "${AGH_DIR}/confdir/AdGuardHome.yaml" 2>/dev/null || true
+        if [ -s "${AGH_DIR}/confdir/AdGuardHome.yaml" ]; then
+            success "Редактирование завершено."
+        else
+            cp -p "${AGH_DIR}/confdir/AdGuardHome.yaml.bak" "${AGH_DIR}/confdir/AdGuardHome.yaml"
+            error "Пустая конфигурация не сохранена; восстановлен бэкап."
+        fi
     else
         error "Файл конфигурации не найден!"
     fi
@@ -901,7 +961,7 @@ do_edit_adguard_yaml() {
 }
 
 do_overwrite_adguard_yaml() {
-    header "Перезапись AdGuardHome.yaml"
+    header "Перезапись AdGuardHome.yaml" "Сервисы > AdGuard Home"
     warn "Это действие полностью ОЧИСТИТ текущий конфиг!"
     read -rp "$(printf "${YELLOW}Вы уверены, что хотите продолжить? [y/N]: ${NC}")" confirm
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -911,36 +971,47 @@ do_overwrite_adguard_yaml() {
     fi
 
     local yaml_path="${AGH_DIR}/confdir/AdGuardHome.yaml"
-    
+    require_commands nano || { press_enter; return 1; }
+    [ -f "$yaml_path" ] && cp -p "$yaml_path" "${yaml_path}.bak"
+    chmod 0600 "${yaml_path}.bak" 2>/dev/null || true
     # Очищаем файл
     : > "$yaml_path"
     info "Файл очищен. Сейчас откроется nano..."
     sleep 1
     nano "$yaml_path"
+    chmod 0600 "$yaml_path" 2>/dev/null || true
+    if [ ! -s "$yaml_path" ]; then
+        [ -f "${yaml_path}.bak" ] && cp -p "${yaml_path}.bak" "$yaml_path"
+        error "Пустой конфиг отклонён; восстановлена предыдущая версия."
+        press_enter
+        return 1
+    fi
     
     info "Перезапуск контейнера для применения нового конфига..."
-    cd "${AGH_DIR}" && docker compose restart
-    
-    success "Конфигурация обновлена и AdGuard Home перезапущен."
+    if compose_run "$AGH_DIR" restart; then
+        success "Конфигурация обновлена и AdGuard Home перезапущен."
+    else
+        error "Конфигурация сохранена, но контейнер не перезапустился."
+    fi
     press_enter
 }
 
 menu_adguard() {
     while true; do
         clear
-        header "AdGuard Home" "Приложения"
-        printf "${BLUE}─── Состояние: $(get_docker_status "adguardhome") ────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Установить AdGuard Home (с нуля)\n"
-        printf "${BOLD}  2)${NC} Запустить\n"
-        printf "${BOLD}  3)${NC} Остановить\n"
-        printf "${BOLD}  4)${NC} Перезапустить\n"
-        printf "${BOLD}  5)${NC} Показать логи\n"
-        printf "${BOLD}  6)${NC} Редактировать AdGuardHome.yaml\n"
-        printf "${BOLD}  7)${NC} ПЕРЕЗАПИСАТЬ AdGuardHome.yaml (Очистить)\n"
+        header "AdGuard Home" "Сервисы"
+        menu_section "Состояние: $(get_docker_status "adguardhome")"
+        menu_item 1 "Установить с нуля"
+        menu_item 2 "Запустить"
+        menu_item 3 "Остановить"
+        menu_item 4 "Перезапустить"
+        menu_item 5 "Показать логи"
         echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Конфигурация"
+        menu_item 6 "Редактировать AdGuardHome.yaml"
+        menu_item 7 "Пересоздать AdGuardHome.yaml"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_install_adguard ;;
@@ -957,7 +1028,7 @@ menu_adguard() {
 }
 
 do_trafficguard() {
-    header "Trafficguard Pro Manager"
+    header "Trafficguard Pro Manager" "Безопасность"
     if command -v rknpidor &>/dev/null; then
         rknpidor
     else
@@ -965,8 +1036,11 @@ do_trafficguard() {
         read -rp "$(printf "${YELLOW}Хотите установить Trafficguard Pro? [y/N]: ${NC}")" confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             info "Установка Trafficguard Pro..."
-            curl -fsSL https://raw.githubusercontent.com/DonMatteoVPN/TrafficGuard-auto/refs/heads/main/install-trafficguard.sh | bash
-            success "Установка завершена."
+            if run_remote_script "https://raw.githubusercontent.com/DonMatteoVPN/TrafficGuard-auto/refs/heads/main/install-trafficguard.sh"; then
+                success "Установка завершена."
+            else
+                error "Установка Trafficguard завершилась ошибкой."
+            fi
             if command -v rknpidor &>/dev/null; then
                 rknpidor
             fi
@@ -981,12 +1055,11 @@ menu_security() {
     while true; do
         clear
         header "Безопасность" "Главное меню"
-        printf "${BOLD}  1)${NC} Настройка Фаервола (UFW)\n"
-        printf "${BOLD}  2)${NC} Trafficguard Pro Manager\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Инструменты"
+        menu_item 1 "Управление UFW"
+        menu_item 2 "Trafficguard Pro Manager"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) menu_ufw ;;
@@ -998,7 +1071,7 @@ menu_security() {
 }
 
 do_install_logs() {
-    header "Установка системы логов"
+    header "Установка системы логов" "Мониторинг"
 
     # 0. Проверка существующей установки
     if [ -f "/etc/logrotate.d/remnanode" ] || [ -d "$LOG_DIR" ]; then
@@ -1028,7 +1101,8 @@ do_install_logs() {
     mkdir -p "$LOG_DIR"
     touch "$LOG_DIR/access.log"
     touch "$LOG_DIR/error.log"
-    chmod -R 777 "$LOG_DIR"
+    chmod 0775 "$LOG_DIR"
+    chmod 0664 "$LOG_DIR/access.log" "$LOG_DIR/error.log"
     info "Папка $LOG_DIR готова."
 
     # 3. Logrotate конфиг
@@ -1049,7 +1123,8 @@ EOF
 
     # 4. Volume в docker-compose.yml
     if [ -f "$COMPOSE_FILE" ]; then
-        cp "$COMPOSE_FILE" "$COMPOSE_FILE.bak"
+        cp -p "$COMPOSE_FILE" "$COMPOSE_FILE.bak"
+        chmod 0600 "$COMPOSE_FILE.bak" 2>/dev/null || true
         if grep -q "/var/log/remnanode:/var/log/remnanode" "$COMPOSE_FILE"; then
             info "Volume для логов уже есть в docker-compose.yml."
         else
@@ -1059,13 +1134,20 @@ EOF
             else
                 sed -i '/SECRET_KEY/a \    volumes:\n      - "/var/log/remnanode:/var/log/remnanode"' "$COMPOSE_FILE"
             fi
-            success "Volume добавлен."
+            chmod 0600 "$COMPOSE_FILE" 2>/dev/null || true
+            if compose_validate "$REMNA_DIR"; then
+                success "Volume добавлен."
+            else
+                cp -p "$COMPOSE_FILE.bak" "$COMPOSE_FILE"
+                error "Изменение Compose отклонено; восстановлена резервная копия."
+                press_enter
+                return 1
+            fi
         fi
 
         # 5. Рестарт
         info "Перезапуск контейнера..."
-        cd "$REMNA_DIR" && docker compose down && docker compose up -d
-        success "Контейнер перезапущен."
+        if compose_run "$REMNA_DIR" up -d; then success "Контейнер перезапущен."; else error "Ошибка перезапуска контейнера."; fi
     else
         warn "docker-compose.yml не найден. Volume нужно будет добавить вручную."
     fi
@@ -1091,13 +1173,12 @@ menu_monitoring() {
     while true; do
         clear
         header "Мониторинг" "Главное меню"
-        printf "${BOLD}  1)${NC} Beszel Agent (Панель мониторинга)\n"
-        printf "${BOLD}  2)${NC} VPN Guard (Docker + Аналитика)\n"
-        printf "${BOLD}  3)${NC} Настройка ротации логов (Logrotate)\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Сервисы мониторинга"
+        menu_item 1 "Beszel Agent"
+        menu_item 2 "VPN Guard"
+        menu_item 3 "Ротация логов Remnanode"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_install_beszel ;;
@@ -1113,12 +1194,11 @@ menu_apps() {
     while true; do
         clear
         header "Сервисы" "Главное меню"
-        printf "${BOLD}  1)${NC} AdGuard Home (DNS-фильтрация)\n"
-        printf "${BOLD}  2)${NC} Cloudflare WARP (VPN для сервера)\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Доступные сервисы"
+        menu_item 1 "AdGuard Home"
+        menu_item 2 "Cloudflare WARP"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) menu_adguard ;;
@@ -1148,7 +1228,7 @@ do_test_ip_region() {
         return
     }
 
-    if ! wget -qO "$ipregion_script" https://ipregion.vrnt.xyz; then
+    if ! download_atomic "https://ipregion.vrnt.xyz" "$ipregion_script"; then
         error "Не удалось скачать ipregion."
         rm -f "$ipregion_script"
         press_enter
@@ -1228,45 +1308,45 @@ do_test_ip_region() {
 
 do_test_censor_geoblock() {
     header "Censorcheck: Проверка геоблока" "Тесты"
-    bash <(wget -qO- https://github.com/vernette/censorcheck/raw/master/censorcheck.sh) --mode geoblock
+    run_remote_script "https://github.com/vernette/censorcheck/raw/master/censorcheck.sh" --mode geoblock || error "Тест завершился ошибкой."
     press_enter
 }
 
 do_test_censor_dpi() {
     header "Censorcheck: Проверка DPI (РФ)" "Тесты"
-    bash <(wget -qO- https://github.com/vernette/censorcheck/raw/master/censorcheck.sh) --mode dpi
+    run_remote_script "https://github.com/vernette/censorcheck/raw/master/censorcheck.sh" --mode dpi || error "Тест завершился ошибкой."
     press_enter
 }
 
 do_test_ip_quality_place() {
     header "Проверка IP (IP.Check.Place)" "Тесты"
-    bash <(curl -Ls IP.Check.Place) -l en
+    run_remote_script "https://IP.Check.Place" -l en || error "Тест завершился ошибкой."
     press_enter
 }
 
 do_test_ip_quality_check() {
     header "IP Quality (Check.Place)" "Тесты"
-    bash <(curl -Ls https://Check.Place) -EI
+    run_remote_script "https://Check.Place" -EI || error "Тест завершился ошибкой."
     press_enter
 }
 
 do_test_iperf_ru() {
     header "Тест скорости до RU iPerf3 серверов" "Тесты"
-    bash <(wget -qO- https://github.com/itdoginfo/russian-iperf3-servers/raw/main/speedtest.sh)
+    run_remote_script "https://github.com/itdoginfo/russian-iperf3-servers/raw/main/speedtest.sh" || error "Тест завершился ошибкой."
     press_enter
 }
 
 do_test_yabs() {
     header "Yet Another Bench Script (YABS)" "Тесты"
     info "Запуск YABS (только IPv4)..."
-    curl -sL yabs.sh | bash -s -- -4
+    run_remote_script "https://yabs.sh" -4 || error "YABS завершился ошибкой."
     press_enter
 }
 
 do_test_bench_sh() {
     header "Bench.sh" "Тесты"
     info "Запуск классического теста..."
-    wget -qO- bench.sh | bash
+    run_remote_script "https://bench.sh" || error "Bench.sh завершился ошибкой."
     press_enter
 }
 
@@ -1285,25 +1365,23 @@ menu_tests() {
     while true; do
         clear
         header "Тесты и Бенчмарки" "Главное меню"
-        printf "${BLUE}─── Проверка IP и Блокировок ────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Проверка региона IP\n"
-        printf "${BOLD}  2)${NC} Censorcheck: Проверка геоблока\n"
-        printf "${BOLD}  3)${NC} Censorcheck: Проверка DPI (РФ)\n"
-        printf "${BOLD}  4)${NC} IP.Check.Place (Full info)\n"
-        printf "${BOLD}  5)${NC} IPQuality (Score check)\n"
+        menu_section "IP и блокировки"
+        menu_item 1 "Проверить регион IP"
+        menu_item 2 "Censorcheck: геоблок"
+        menu_item 3 "Censorcheck: DPI"
+        menu_item 4 "IP.Check.Place"
+        menu_item 5 "IP Quality"
         echo ""
-        printf "${BLUE}─── Скорость и Производительность ───────────────────${NC}\n"
-        printf "${BOLD}  6)${NC} Скорость до RU iPerf3 серверов\n"
-        printf "${BOLD}  7)${NC} YABS (CPU + Disk + Net IPv4)\n"
-        printf "${BOLD}  8)${NC} Bench.sh (Info + IPv4/IPv6 Speed)\n"
-        printf "${BOLD}  9)${NC} Тест CPU (через sysbench)\n"
+        menu_section "Производительность"
+        menu_item 6 "Скорость до RU iPerf3"
+        menu_item 7 "YABS"
+        menu_item 8 "Bench.sh"
+        menu_item 9 "CPU через sysbench"
         echo ""
-        printf "${BLUE}─── Диагностика узких мест ──────────────────────────${NC}\n"
-        printf "${BOLD} 10)${NC} Комплексная диагностика ноды (Анализ проблем)\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Диагностика"
+        menu_item 10 "Комплексная диагностика ноды"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_test_ip_region ;;
@@ -1321,4 +1399,3 @@ menu_tests() {
         esac
     done
 }
-

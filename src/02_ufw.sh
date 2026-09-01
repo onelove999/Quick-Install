@@ -2,13 +2,26 @@
 
 # ─── Функции статуса ─────────────────────────────────────────
 
+ensure_ufw() {
+    if command -v ufw &>/dev/null; then
+        return 0
+    fi
+    warn "UFW не установлен."
+    if command -v apt-get &>/dev/null && confirm_action "Установить пакет ufw"; then
+        apt-get update -qq && apt-get install -y ufw && return 0
+    fi
+    error "Без UFW действие невозможно."
+    press_enter
+    return 1
+}
+
 get_icmp_status() {
     local rules_file="/etc/ufw/before.rules"
     if [ ! -f "$rules_file" ]; then
         printf "${RED}(Файл не найден)${NC}"
         return
     fi
-    if grep -q "\-A ufw-before-input -p icmp --icmp-type echo-request -j DROP" "$rules_file"; then
+    if grep -q -- "^-A ufw-before-input -p icmp --icmp-type echo-request -j DROP$" "$rules_file"; then
         printf "${RED}(Запрещены)${NC}"
     else
         printf "${GREEN}(Разрешены)${NC}"
@@ -17,21 +30,25 @@ get_icmp_status() {
 
 ufw_enable_secure() {
     header "Включение UFW (Безопасное)" "Безопасность"
+    ensure_ufw || return
     
     warn "Это действие включит фаервол и разрешит доступ по SSH."
-    read -rp "$(printf "${YELLOW}Продолжить? [y/N]: ${NC}")" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    if ! confirm_action "Продолжить"; then
         info "Отменено."
         press_enter
         return
     fi
 
-    info "Разрешаем OpenSSH..."
-    ufw allow OpenSSH
-    info "Добавляем защиту SSH от брутфорса (rate limit)..."
-    ufw limit ssh
+    local ssh_port
+    while IFS= read -r ssh_port; do
+        is_valid_port "$ssh_port" || continue
+        info "Разрешаем активный SSH-порт ${ssh_port}/tcp..."
+        ufw allow "${ssh_port}/tcp" || { error "Не удалось добавить SSH-правило."; press_enter; return 1; }
+        info "Добавляем rate limit для ${ssh_port}/tcp..."
+        ufw limit "${ssh_port}/tcp" || { error "Не удалось добавить SSH rate limit."; press_enter; return 1; }
+    done < <(get_sshd_ports)
     info "Включаем UFW..."
-    echo "y" | ufw enable
+    ufw --force enable || { error "Не удалось включить UFW."; press_enter; return 1; }
     success "UFW включён. OpenSSH разрешён."
     ufw status verbose
     press_enter
@@ -39,14 +56,20 @@ ufw_enable_secure() {
 
 ufw_enable_basic() {
     header "Простое включение UFW" "Безопасность"
+    ensure_ufw || return
     
     # ПРОВЕРКА SSH
-    if ! ufw status | grep -qE "22/(tcp|any).*ALLOW|OpenSSH.*ALLOW"; then
-        warn "ВНИМАНИЕ: Порт SSH (22) или правило OpenSSH не найдены в списке разрешенных!"
+    local ssh_port missing_ssh=0
+    while IFS= read -r ssh_port; do
+        if ! ufw status | grep -qE "^${ssh_port}(/tcp)?[[:space:]]+ALLOW|OpenSSH[[:space:]]+ALLOW"; then
+            missing_ssh=1
+            warn "ВНИМАНИЕ: разрешающее правило для SSH-порта ${ssh_port}/tcp не найдено."
+        fi
+    done < <(get_sshd_ports)
+    if [ "$missing_ssh" -eq 1 ]; then
         warn "Включение UFW может привести к потере доступа по SSH."
         echo ""
-        read -rp "$(printf "${YELLOW}Вы уверены, что хотите продолжить? [y/N]: ${NC}")" confirm
-        if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        if ! confirm_action "Вы уверены, что хотите продолжить"; then
             info "Включение отменено."
             press_enter
             return
@@ -54,7 +77,7 @@ ufw_enable_basic() {
     fi
 
     info "Включаем UFW..."
-    echo "y" | ufw enable
+    ufw --force enable || { error "Не удалось включить UFW."; press_enter; return 1; }
     success "UFW включён (без добавления новых правил)."
     ufw status verbose
     press_enter
@@ -62,30 +85,33 @@ ufw_enable_basic() {
 
 ufw_disable() {
     header "Выключение UFW" "Безопасность"
-    read -rp "$(printf "${YELLOW}Вы уверены, что хотите полностью выключить фаервол? [y/N]: ${NC}")" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    ensure_ufw || return
+    if ! confirm_action "Вы уверены, что хотите полностью выключить фаервол"; then
         info "Отменено."
         press_enter
         return
     fi
-    ufw disable
+    ufw disable || { error "Не удалось выключить UFW."; press_enter; return 1; }
     success "UFW выключен."
     press_enter
 }
 
 ufw_open_port() {
     header "Открытие порта" "Безопасность > UFW"
-    local port
+    ensure_ufw || return
+    local port proto
     while true; do
         read -rp "Введите порт (или диапазон, напр. 8000:8100): " port
         if [ -z "$port" ]; then info "Отменено."; return; fi
-        if is_valid_port "${port%%:*}"; then break; else error "Неверный формат порта!"; fi
+        if is_valid_port_spec "$port"; then break; else error "Неверный порт или диапазон!"; fi
     done
     read -rp "Протокол [tcp/udp/any] (Enter = any): " proto
+    proto=${proto:-any}
+    if ! is_valid_protocol "$proto"; then error "Допустимы только tcp, udp или any."; press_enter; return 1; fi
     if [ -z "$proto" ] || [ "$proto" = "any" ]; then
-        ufw allow "$port"
+        ufw allow "$port" || { error "Не удалось открыть порт."; press_enter; return 1; }
     else
-        ufw allow "$port/$proto"
+        ufw allow "$port/$proto" || { error "Не удалось открыть порт."; press_enter; return 1; }
     fi
     success "Порт $port открыт."
     press_enter
@@ -93,7 +119,8 @@ ufw_open_port() {
 
 ufw_open_port_ip() {
     header "Открытие порта для конкретного IP" "Безопасность > UFW"
-    local ip port
+    ensure_ufw || return
+    local ip port proto
     while true; do
         read -rp "Введите IP-адрес: " ip
         if is_valid_ip "$ip"; then break; else error "Неверный формат IP!"; fi
@@ -104,19 +131,25 @@ ufw_open_port_ip() {
     done
     read -rp "Протокол [tcp/udp] (Enter = tcp): " proto
     proto=${proto:-tcp}
-    ufw allow from "$ip" to any port "$port" proto "$proto"
+    if ! is_valid_protocol "$proto" || [ "$proto" = "any" ]; then error "Допустимы только tcp или udp."; press_enter; return 1; fi
+    ufw allow from "$ip" to any port "$port" proto "$proto" || { error "Не удалось добавить правило."; press_enter; return 1; }
     success "Порт $port открыт для IP $ip ($proto)."
     press_enter
 }
 
 ufw_close_port() {
     header "Закрытие порта" "Безопасность > UFW"
+    ensure_ufw || return
+    local port proto
     read -rp "Введите порт (или диапазон): " port
+    if ! is_valid_port_spec "$port"; then error "Неверный порт или диапазон."; press_enter; return 1; fi
     read -rp "Протокол [tcp/udp/any] (Enter = any): " proto
+    proto=${proto:-any}
+    if ! is_valid_protocol "$proto"; then error "Допустимы только tcp, udp или any."; press_enter; return 1; fi
     if [ -z "$proto" ] || [ "$proto" = "any" ]; then
-        ufw deny "$port"
+        ufw --force delete allow "$port" || { error "Разрешающее правило для $port не найдено."; press_enter; return 1; }
     else
-        ufw deny "$port/$proto"
+        ufw --force delete allow "$port/$proto" || { error "Разрешающее правило для $port/$proto не найдено."; press_enter; return 1; }
     fi
     success "Порт $port закрыт."
     press_enter
@@ -124,41 +157,34 @@ ufw_close_port() {
 
 ufw_close_port_ip() {
     header "Закрытие порта для конкретного IP" "Безопасность > UFW"
+    ensure_ufw || return
+    local ip port proto
     read -rp "Введите IP-адрес: " ip
+    if ! is_valid_ip "$ip"; then error "Неверный IP-адрес."; press_enter; return 1; fi
     read -rp "Введите порт: " port
+    if ! is_valid_port "$port"; then error "Неверный порт."; press_enter; return 1; fi
     read -rp "Протокол [tcp/udp] (Enter = tcp): " proto
     proto=${proto:-tcp}
-    ufw deny from "$ip" to any port "$port" proto "$proto"
+    if ! is_valid_protocol "$proto" || [ "$proto" = "any" ]; then error "Допустимы только tcp или udp."; press_enter; return 1; fi
+    ufw --force delete allow from "$ip" to any port "$port" proto "$proto" || {
+        error "Соответствующее разрешающее правило не найдено."
+        press_enter
+        return 1
+    }
     success "Порт $port закрыт для IP $ip ($proto)."
     press_enter
 }
 
 set_icmp_rules() {
-    local file="$1" action="$2"  # action = DROP или ACCEPT
-
-    # 1. Удаляем ВСЕ существующие ICMP-правила (и DROP и ACCEPT) из обеих секций
-    sed -i '/-A ufw-before-input -p icmp --icmp-type .* -j \(ACCEPT\|DROP\)/d' "$file"
-    sed -i '/-A ufw-before-forward -p icmp --icmp-type .* -j \(ACCEPT\|DROP\)/d' "$file"
-
-    # 2. Вставляем INPUT правила после якоря
+    local file="$1" action="$2"
     local input_anchor="# ok icmp codes for INPUT"
-    if grep -qF "$input_anchor" "$file"; then
-        sed -i "/${input_anchor}/a\\
--A ufw-before-input -p icmp --icmp-type destination-unreachable -j ${action}\\
--A ufw-before-input -p icmp --icmp-type time-exceeded -j ${action}\\
--A ufw-before-input -p icmp --icmp-type parameter-problem -j ${action}\\
--A ufw-before-input -p icmp --icmp-type echo-request -j ${action}\\
--A ufw-before-input -p icmp --icmp-type source-quench -j ${action}" "$file"
-    fi
-
-    # 3. Вставляем FORWARD правила после якоря
-    local forward_anchor="# ok icmp code for FORWARD"
-    if grep -qF "$forward_anchor" "$file"; then
-        sed -i "/${forward_anchor}/a\\
--A ufw-before-forward -p icmp --icmp-type destination-unreachable -j ${action}\\
--A ufw-before-forward -p icmp --icmp-type time-exceeded -j ${action}\\
--A ufw-before-forward -p icmp --icmp-type parameter-problem -j ${action}\\
--A ufw-before-forward -p icmp --icmp-type echo-request -j ${action}" "$file"
+    if grep -qE '^-A ufw-before-input -p icmp --icmp-type echo-request -j (ACCEPT|DROP)$' "$file"; then
+        sed -i -E "s|^(-A ufw-before-input -p icmp --icmp-type echo-request -j) (ACCEPT|DROP)$|\\1 ${action}|" "$file"
+    elif grep -qF "$input_anchor" "$file"; then
+        sed -i "/${input_anchor}/a\\-A ufw-before-input -p icmp --icmp-type echo-request -j ${action}" "$file"
+    else
+        error "Не найден блок INPUT ICMP в $file."
+        return 1
     fi
 }
 
@@ -168,8 +194,8 @@ ufw_disable_ping() {
     info "Текущий статус: $(get_icmp_status)"
     warn "Отключение ответов на пинг сделает сервер 'невидимым' для простых проверок."
     echo ""
-    read -rp "$(printf "${YELLOW}Отключить ответы на пинг (icmp-type echo-request -> DROP)? [y/N]: ${NC}")" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    ensure_ufw || return
+    if ! confirm_action "Отключить только echo-request (ping)"; then
         info "Отменено."
         press_enter
         return
@@ -178,11 +204,17 @@ ufw_disable_ping() {
     local rules_file="/etc/ufw/before.rules"
     if [ ! -f "$rules_file" ]; then error "Файл конфигурации не найден!"; press_enter; return; fi
 
-    cp "$rules_file" "${rules_file}.bak.$(date +%Y%m%d%H%M%S)"
+    local backup="${rules_file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "$rules_file" "$backup"
     info "Бэкап конфигурации создан."
 
-    measure_time set_icmp_rules "$rules_file" "DROP"
-    ufw reload >/dev/null 2>&1
+    if ! measure_time set_icmp_rules "$rules_file" "DROP" || ! ufw reload >/dev/null 2>&1; then
+        cp -p "$backup" "$rules_file"
+        ufw reload >/dev/null 2>&1 || true
+        error "Изменение не применено; исходный файл восстановлен."
+        press_enter
+        return 1
+    fi
     success "Конфигурация обновлена. Пинги теперь ИГНОРИРУЮТСЯ."
     press_enter
 }
@@ -192,8 +224,8 @@ ufw_enable_ping() {
 
     info "Текущий статус: $(get_icmp_status)"
     echo ""
-    read -rp "$(printf "${YELLOW}Включить ответы на пинг (icmp-type echo-request -> ACCEPT)? [y/N]: ${NC}")" confirm
-    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+    ensure_ufw || return
+    if ! confirm_action "Включить ответы на ping"; then
         info "Отменено."
         press_enter
         return
@@ -202,28 +234,37 @@ ufw_enable_ping() {
     local rules_file="/etc/ufw/before.rules"
     if [ ! -f "$rules_file" ]; then error "Файл конфигурации не найден!"; press_enter; return; fi
 
-    cp "$rules_file" "${rules_file}.bak.$(date +%Y%m%d%H%M%S)"
+    local backup="${rules_file}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "$rules_file" "$backup"
     info "Бэкап конфигурации создан."
 
-    measure_time set_icmp_rules "$rules_file" "ACCEPT"
-    ufw reload >/dev/null 2>&1
+    if ! measure_time set_icmp_rules "$rules_file" "ACCEPT" || ! ufw reload >/dev/null 2>&1; then
+        cp -p "$backup" "$rules_file"
+        ufw reload >/dev/null 2>&1 || true
+        error "Изменение не применено; исходный файл восстановлен."
+        press_enter
+        return 1
+    fi
     success "Конфигурация обновлена. Пинги теперь РАЗРЕШЕНЫ."
     press_enter
 }
 
 ufw_status() {
     header "Статус UFW" "Безопасность > UFW"
+    ensure_ufw || return
     ufw status numbered verbose
     press_enter
 }
 
 ufw_delete_rule() {
     header "Удаление правила UFW" "Безопасность > UFW"
+    ensure_ufw || return
     ufw status numbered
     echo ""
     read -rp "Введите номер правила для удаления (или 0 для отмены): " rule_num
     if [ "$rule_num" != "0" ] && [ -n "$rule_num" ]; then
-        echo "y" | ufw delete "$rule_num"
+        if ! [[ "$rule_num" =~ ^[0-9]+$ ]]; then error "Номер должен быть целым числом."; press_enter; return 1; fi
+        ufw --force delete "$rule_num" || { error "Не удалось удалить правило #$rule_num."; press_enter; return 1; }
         success "Правило #$rule_num удалено."
     fi
     press_enter
@@ -234,25 +275,24 @@ menu_ufw() {
         clear
         header "Управление UFW" "Безопасность"
         
-        printf "${BLUE}─── Состояние: $(get_ufw_status) ──────── ICMP: $(get_icmp_status) ──${NC}\n"
-        printf "${BOLD}  1)${NC} Статус UFW (подробно)\n"
-        printf "${BOLD}  2)${NC} Включить UFW (Базово)\n"
-        printf "${BOLD}  3)${NC} Включить UFW (Рекомендуется)\n"
-        printf "${BOLD}  4)${NC} Выключить UFW\n"
+        menu_section "UFW: $(get_ufw_status) · Ping: $(get_icmp_status)"
+        menu_item 1 "Показать подробный статус"
+        menu_item 2 "Включить без изменения правил"
+        menu_item 3 "Включить безопасно (с SSH-правилом)"
+        menu_item 4 "Выключить UFW"
         echo ""
-        printf "${BLUE}─── Пинги (ICMP) ────────────────────────────────────${NC}\n"
-        printf "${BOLD}  5)${NC} Запретить ответы на пинг\n"
-        printf "${BOLD}  6)${NC} Разрешить ответы на пинг\n"
+        menu_section "Ping (ICMP echo-request)"
+        menu_item 5 "Запретить ответы на ping"
+        menu_item 6 "Разрешить ответы на ping"
         echo ""
-        printf "${BLUE}─── Управление портами ──────────────────────────────${NC}\n"
-        printf "${BOLD}  7)${NC} Открыть порт (TCP/UDP)\n"
-        printf "${BOLD}  8)${NC} Открыть порт для IP\n"
-        printf "${BOLD}  9)${NC} Закрыть порт\n"
-        printf "${BOLD} 10)${NC} Удалить правило по номеру\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Правила доступа"
+        menu_item 7 "Открыть порт"
+        menu_item 8 "Открыть порт для IPv4"
+        menu_item 9 "Удалить разрешение порта"
+        menu_item 10 "Удалить правило по номеру"
+        menu_item 11 "Удалить разрешение порта для IPv4"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) ufw_status ;;
@@ -265,9 +305,9 @@ menu_ufw() {
             8) ufw_open_port_ip ;;
             9) ufw_close_port ;;
             10) ufw_delete_rule ;;
+            11) ufw_close_port_ip ;;
             0) return ;;
             *) warn "Неверный выбор." ; sleep 1 ;;
         esac
     done
 }
-

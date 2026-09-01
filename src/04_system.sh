@@ -10,9 +10,15 @@ do_update() {
     info "Текущая система: ${BOLD}${os_desc}${NC}"
     info "Запрашиваю список обновлений (apt update)..."
     
-    measure_time apt-get update -qq
+    if ! measure_time apt-get update -qq; then
+        error "Не удалось обновить индекс пакетов."
+        press_enter
+        return 1
+    fi
     
-    local updatable=$(apt list --upgradable 2>/dev/null | grep -c "\[upgradable from:\|может быть обновлен" || echo "0")
+    local updatable
+    updatable=$(apt list --upgradable 2>/dev/null | grep -c "\[upgradable from:\|может быть обновлен" || true)
+    updatable=${updatable:-0}
     
     if [ "$updatable" -gt 0 ]; then
         warn "Найдено пакетов для обновления: ${BOLD}${updatable}${NC}"
@@ -29,9 +35,11 @@ do_update() {
     fi
 
     info "Запуск обновления пакетов..."
-    measure_time apt-get upgrade -y
-    
-    success "Обновление завершено."
+    if measure_time apt-get upgrade -y; then
+        success "Обновление завершено."
+    else
+        error "Обновление завершилось с ошибкой. Проверьте вывод APT выше."
+    fi
     press_enter
 }
 
@@ -60,16 +68,15 @@ do_network_tuning() {
     fi
 
     echo ""
-    printf "Доступные действия:\n"
+    menu_section "Доступные действия"
     if [ "$cur_cc" = "bbr" ] || [ -f "$tuning_conf" ]; then
-        printf "${BOLD}  1)${NC} Обновить / Переустановить BBR + Тюнинг\n"
-        printf "${BOLD}  2)${NC} ${RED}Отключить BBR и Тюнинг${NC} (вернуть стандарт)\n"
+        menu_item 1 "Обновить BBR и сетевой тюнинг"
+        menu_item 2 "Отключить BBR и сетевой тюнинг"
     else
-        printf "${BOLD}  1)${NC} Включить TCP BBR и Продвинутый тюнинг (Рекомендуется)\n"
+        menu_item 1 "Включить TCP BBR и сетевой тюнинг"
     fi
-    printf "${BOLD}  0)${NC} ← Назад\n"
-    echo ""
-    read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" tune_choice
+    menu_back
+    read_choice tune_choice
 
     case "$tune_choice" in
         1)
@@ -78,7 +85,8 @@ do_network_tuning() {
             sysctl -a > /var/backups/quick-install/sysctl-backup-$(date +%Y%m%d-%H%M%S).txt 2>/dev/null
 
             info "Настройка BBR и применение оптимизаций..."
-            measure_time bash -c "
+            if measure_time bash -c "
+                set -e
                 modprobe tcp_bbr 2>/dev/null || true
                 mkdir -p /etc/sysctl.d
                 
@@ -115,19 +123,26 @@ net.ipv4.tcp_max_syn_backlog=8192
 net.netfilter.nf_conntrack_max=524288
 EOF
                 sysctl --system > /dev/null 2>&1
-            "
-            success "TCP BBR и сетевые оптимизации успешно применены."
+            "; then
+                success "TCP BBR и сетевые оптимизации успешно применены."
+            else
+                error "Не удалось применить все параметры sysctl."
+            fi
             ;;
         2)
             if [ "$cur_cc" = "bbr" ] || [ -f "$tuning_conf" ]; then
                 info "Отключение BBR и сетевого тюнинга..."
-                measure_time bash -c "
+                if measure_time bash -c "
+                    set -e
                     rm -f $bbr_conf $tuning_conf
                     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
                     sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1
                     sysctl --system >/dev/null 2>&1
-                "
-                success "Система возвращена к стандартным настройкам сети."
+                "; then
+                    success "Система возвращена к стандартным настройкам сети."
+                else
+                    error "Не удалось полностью отключить сетевой тюнинг."
+                fi
             fi
             ;;
         0|*) return ;;
@@ -171,25 +186,61 @@ do_setup_swap() {
     read -rp "$(printf "${CYAN}Введите новый размер SWAP в ГБ [По умолчанию: 1]: ${NC}")" swap_gb
     swap_gb=${swap_gb:-1}
     
-    if ! [[ "$swap_gb" =~ ^[0-9]+$ ]]; then
-        error "Размер должен быть целым числом!"
+    if ! [[ "$swap_gb" =~ ^[0-9]+$ ]] || [ "$swap_gb" -lt 1 ]; then
+        error "Размер должен быть целым числом не меньше 1 ГБ."
         press_enter
         return
     fi
 
-    info "Перенастройка SWAP файла на ${swap_gb}GB..."
-    
-    measure_time bash -c "
-        swapoff /swapfile 2>/dev/null || true
-        fallocate -l ${swap_gb}G /swapfile && \
-        chmod 600 /swapfile && \
-        mkswap /swapfile && \
-        swapon /swapfile"
-    
-    if ! grep -qE '^/swapfile\s' /etc/fstab; then
-        echo '/swapfile none swap sw 0 0' | tee -a /etc/fstab >/dev/null
+    info "Безопасно создаю новый SWAP-файл на ${swap_gb}GB..."
+
+    local new_swap old_backup="" was_active=0 timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    new_swap=$(mktemp /swapfile.qi-new.XXXXXX) || { error "Не удалось создать временный swap-файл."; press_enter; return 1; }
+
+    if ! fallocate -l "${swap_gb}G" "$new_swap" || ! chmod 600 "$new_swap" || ! mkswap "$new_swap" >/dev/null; then
+        rm -f "$new_swap"
+        error "Не удалось подготовить новый swap-файл. Старый SWAP не изменён."
+        press_enter
+        return 1
     fi
-    
+
+    if swapon --noheadings --show=NAME 2>/dev/null | grep -Fxq /swapfile; then
+        was_active=1
+        if ! swapoff /swapfile; then
+            rm -f "$new_swap"
+            error "Не удалось отключить текущий /swapfile (возможно, не хватает RAM). Изменения отменены."
+            press_enter
+            return 1
+        fi
+    fi
+
+    if [ -e /swapfile ]; then
+        old_backup="/swapfile.qi-backup.${timestamp}"
+        if ! mv /swapfile "$old_backup"; then
+            [ "$was_active" -eq 1 ] && swapon /swapfile 2>/dev/null || true
+            rm -f "$new_swap"
+            error "Не удалось сохранить старый swap-файл."
+            press_enter
+            return 1
+        fi
+    fi
+
+    if ! mv "$new_swap" /swapfile || ! swapon /swapfile; then
+        rm -f /swapfile
+        if [ -n "$old_backup" ] && [ -e "$old_backup" ]; then
+            mv "$old_backup" /swapfile
+            [ "$was_active" -eq 1 ] && swapon /swapfile 2>/dev/null || true
+        fi
+        error "Новый SWAP не активирован; предыдущий файл восстановлен."
+        press_enter
+        return 1
+    fi
+
+    [ -n "$old_backup" ] && rm -f "$old_backup"
+    sed -i '\|^/swapfile[[:space:]]|d' /etc/fstab
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+
     success "SWAP успешно настроен. Итоговая сводка:"
     free -h
     press_enter
@@ -239,10 +290,15 @@ do_disable_ipv6() {
     local conf_file="/etc/sysctl.d/99-disable-ipv6.conf"
     
     info "Применение ограничений IPv6..."
-    measure_time bash -c "
+    if ! measure_time bash -c "
+        set -e
         printf 'net.ipv6.conf.all.disable_ipv6 = 1\nnet.ipv6.conf.default.disable_ipv6 = 1\nnet.ipv6.conf.lo.disable_ipv6 = 1\n' > $conf_file
         sysctl -p $conf_file > /dev/null 2>&1
-    "
+    "; then
+        error "Не удалось отключить IPv6."
+        press_enter
+        return 1
+    fi
     
     success "IPv6 отключен. Проверяем остаточные адреса..."
     ip -6 addr show scope global
@@ -262,12 +318,17 @@ do_enable_ipv6() {
     local conf_file="/etc/sysctl.d/99-disable-ipv6.conf"
     
     info "Сброс ограничений..."
-    measure_time bash -c "
+    if ! measure_time bash -c "
+        set -e
         [ -f '$conf_file' ] && rm '$conf_file'
         sysctl -w net.ipv6.conf.all.disable_ipv6=0 > /dev/null 2>&1
         sysctl -w net.ipv6.conf.default.disable_ipv6=0 > /dev/null 2>&1
         sysctl -w net.ipv6.conf.lo.disable_ipv6=0 > /dev/null 2>&1
-    "
+    "; then
+        error "Не удалось включить IPv6."
+        press_enter
+        return 1
+    fi
     
     success "IPv6 включен. Возможно, потребуется 'ip link set \$IFACE up' или перезагрузка."
     press_enter
@@ -277,14 +338,12 @@ menu_ipv6() {
     while true; do
         clear
         header "Управление IPv6" "Система"
-        printf "${BLUE}─── Состояние: $(get_ipv6_status) ─────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Проверить статус и пинг\n"
-        printf "${BOLD}  2)${NC} Отключить IPv6\n"
-        printf "${BOLD}  3)${NC} Включить IPv6\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Состояние: $(get_ipv6_status)"
+        menu_item 1 "Проверить статус и соединение"
+        menu_item 2 "Отключить IPv6"
+        menu_item 3 "Включить IPv6"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_check_ipv6_status ;;
@@ -321,12 +380,16 @@ do_mss_clamp() {
         echo ""
         read -rp "$(printf "${YELLOW}Вы хотите УДАЛИТЬ правила MSS Clamp? [y/N]: ${NC}")" confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
-            measure_time bash -c "
+            if ! measure_time bash -c "
                 iptables -t mangle -D FORWARD $rule_args 2>/dev/null || true
                 iptables -t mangle -D OUTPUT $rule_args 2>/dev/null || true
-            "
+            "; then
+                error "Не удалось удалить правила MSS Clamp."
+                press_enter
+                return 1
+            fi
             if [ -f /etc/systemd/system/qi-mss-clamp.service ]; then
-                systemctl disable qi-mss-clamp.service >/dev/null 2>&1
+                systemctl disable --now qi-mss-clamp.service >/dev/null 2>&1 || true
                 rm -f /etc/systemd/system/qi-mss-clamp.service
                 systemctl daemon-reload >/dev/null 2>&1
             fi
@@ -338,10 +401,16 @@ do_mss_clamp() {
         read -rp "$(printf "${CYAN}Вы хотите ДОБАВИТЬ правила MSS Clamp? [y/N]: ${NC}")" confirm
         if [[ "$confirm" =~ ^[Yy]$ ]]; then
             info "Применение правил iptables..."
-            measure_time bash -c "
+            if ! measure_time bash -c "
+                set -e
                 [ \"$has_forward\" = \"0\" ] && iptables -t mangle -A FORWARD $rule_args
                 [ \"$has_output\" = \"0\" ] && iptables -t mangle -A OUTPUT $rule_args
-            "
+                true
+            "; then
+                error "Не удалось применить правила MSS Clamp."
+                press_enter
+                return 1
+            fi
             success "Правила MSS Clamp успешно применены."
             
             # Создаем независимый systemd сервис для сохранения правил при перезагрузке
@@ -353,16 +422,21 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/sbin/iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-ExecStart=/sbin/iptables -t mangle -A OUTPUT -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+ExecStart=/bin/bash -c '/sbin/iptables -t mangle -C FORWARD $rule_args 2>/dev/null || /sbin/iptables -t mangle -A FORWARD $rule_args'
+ExecStart=/bin/bash -c '/sbin/iptables -t mangle -C OUTPUT $rule_args 2>/dev/null || /sbin/iptables -t mangle -A OUTPUT $rule_args'
+ExecStop=/bin/bash -c '/sbin/iptables -t mangle -C FORWARD $rule_args 2>/dev/null && /sbin/iptables -t mangle -D FORWARD $rule_args || true'
+ExecStop=/bin/bash -c '/sbin/iptables -t mangle -C OUTPUT $rule_args 2>/dev/null && /sbin/iptables -t mangle -D OUTPUT $rule_args || true'
 RemainAfterExit=yes
 
 [Install]
 WantedBy=multi-user.target
 EOF
             systemctl daemon-reload >/dev/null 2>&1
-            systemctl enable qi-mss-clamp.service >/dev/null 2>&1
-            success "Автозапуск настроен через systemd-сервис qi-mss-clamp."
+            if systemctl enable --now qi-mss-clamp.service >/dev/null 2>&1; then
+                success "Автозапуск настроен через systemd-сервис qi-mss-clamp."
+            else
+                error "Правила применены, но systemd-сервис qi-mss-clamp не запустился."
+            fi
         fi
     fi
     press_enter
@@ -371,6 +445,21 @@ EOF
 # ═══════════════════════════════════════════════════════════════
 # 6. АППАРАТНЫЙ ТЮНИНГ (RPS и Ring Buffers)
 # ═══════════════════════════════════════════════════════════════
+build_cpu_mask() {
+    local cpu_count=$1 full_groups remainder group mask=""
+    full_groups=$((cpu_count / 32))
+    remainder=$((cpu_count % 32))
+    if [ "$remainder" -gt 0 ]; then
+        printf -v group '%x' "$(( (1 << remainder) - 1 ))"
+        mask=$group
+    fi
+    while [ "$full_groups" -gt 0 ]; do
+        if [ -n "$mask" ]; then mask="$mask,ffffffff"; else mask="ffffffff"; fi
+        full_groups=$((full_groups - 1))
+    done
+    printf '%s\n' "${mask:-1}"
+}
+
 do_hardware_tuning() {
     header "Аппаратный тюнинг NIC" "Система"
     
@@ -418,11 +507,14 @@ do_hardware_tuning() {
         max_rx=$(ethtool -g "$iface" 2>/dev/null | awk '/Pre-set maximums/,/Current/' | awk '/RX:/ {print $2; exit}')
         cur_rx=$(ethtool -g "$iface" 2>/dev/null | awk '/Current hardware settings/,0' | awk '/RX:/ {print $2; exit}')
         max_tx=$(ethtool -g "$iface" 2>/dev/null | awk '/Pre-set maximums/,/Current/' | awk '/TX:/ {print $2; exit}')
+        cur_tx=$(ethtool -g "$iface" 2>/dev/null | awk '/Current hardware settings/,0' | awk '/TX:/ {print $2; exit}')
         
         if [ -z "$max_rx" ] || [ "$max_rx" = "0" ]; then
             warn "Ring Buffers: Не поддерживается драйвером (часто на виртуалках virtio_net)."
-        elif [ "$cur_rx" = "$max_rx" ] || systemctl is-enabled vpn-ring.service >/dev/null 2>&1; then
-            success "Ring Buffers: НА МАКСИМУМЕ ($cur_rx/$max_rx) | Дропы: RX=${rx_drops:-0}, TX=${tx_drops:-0}"
+        elif ! [[ "$max_rx" =~ ^[0-9]+$ && "$max_tx" =~ ^[0-9]+$ ]]; then
+            warn "Ring Buffers: драйвер вернул неполные значения RX/TX; автоматическая настройка пропущена."
+        elif { [ "$cur_rx" = "$max_rx" ] && [ "$cur_tx" = "$max_tx" ]; } || systemctl is-enabled vpn-ring.service >/dev/null 2>&1; then
+            success "Ring Buffers: НА МАКСИМУМЕ (RX $cur_rx/$max_rx, TX $cur_tx/$max_tx) | Дропы: RX=${rx_drops:-0}, TX=${tx_drops:-0}"
         else
             needs_ring=1
             warn "Ring Buffers: Текущие ($cur_rx), Максимальные ($max_rx) | Дропы: RX=${rx_drops:-0}, TX=${tx_drops:-0}"
@@ -460,8 +552,9 @@ do_hardware_tuning() {
         info "Применение оптимизаций..."
         
         if [ "$needs_rps" = "1" ]; then
-            local n=$(nproc)
-            local mask=$(printf '%x' $(( (1 << n) - 1 )))
+            local n mask
+            n=$(nproc)
+            mask=$(build_cpu_mask "$n")
             
             cat > /etc/systemd/system/vpn-rps.service <<UNIT
 [Unit]
@@ -471,14 +564,18 @@ After=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do echo $mask > \$\$q/rps_cpus; done'
+ExecStart=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do [ -f "\$q/rps_cpus" ] && echo $mask > "\$q/rps_cpus"; done'
+ExecStop=/bin/bash -c 'for q in /sys/class/net/$iface/queues/rx-*; do [ -f "\$q/rps_cpus" ] && echo 0 > "\$q/rps_cpus"; done'
 
 [Install]
 WantedBy=multi-user.target
 UNIT
             systemctl daemon-reload
-            systemctl enable --now vpn-rps.service >/dev/null 2>&1
-            success "Служба vpn-rps.service (RPS) установлена и запущена."
+            if systemctl enable --now vpn-rps.service >/dev/null 2>&1; then
+                success "Служба vpn-rps.service (RPS) установлена и запущена."
+            else
+                error "Не удалось запустить vpn-rps.service."
+            fi
         fi
         
         if [ "$needs_ring" = "1" ]; then
@@ -496,8 +593,11 @@ ExecStart=/sbin/ethtool -G $iface rx $max_rx tx $max_tx
 WantedBy=multi-user.target
 UNIT
             systemctl daemon-reload
-            systemctl enable --now vpn-ring.service >/dev/null 2>&1
-            success "Служба vpn-ring.service (Ring Buffers) установлена и запущена."
+            if systemctl enable --now vpn-ring.service >/dev/null 2>&1; then
+                success "Служба vpn-ring.service (Ring Buffers) установлена и запущена."
+            else
+                error "Не удалось запустить vpn-ring.service."
+            fi
         fi
     else
         info "Действие отменено."
@@ -510,19 +610,17 @@ menu_system() {
     while true; do
         clear
         header "Система и Сеть" "Главное меню"
-        printf "${BLUE}─── Базовые настройки ───────────────────────────────${NC}\n"
-        printf "${BOLD}  1)${NC} Обновление системы (APT upgrade)\n"
-        printf "${BOLD}  2)${NC} Настройка SWAP\n"
+        menu_section "Базовые настройки"
+        menu_item 1 "Обновить систему (APT upgrade)"
+        menu_item 2 "Настроить SWAP"
         echo ""
-        printf "${BLUE}─── Сетевые настройки ───────────────────────────────${NC}\n"
-        printf "${BOLD}  3)${NC} Установка TCP BBR и Тюнинг сети\n"
-        printf "${BOLD}  4)${NC} Управление IPv6\n"
-        printf "${BOLD}  5)${NC} Настройка MSS Clamp (для туннелей)\n"
-        printf "${BOLD}  6)${NC} Аппаратный тюнинг (RPS и Ring Buffers)\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Сетевые настройки"
+        menu_item 3 "TCP BBR и сетевой тюнинг"
+        menu_item 4 "Управление IPv6"
+        menu_item 5 "MSS Clamp для туннелей"
+        menu_item 6 "Аппаратный тюнинг NIC"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_update ;;

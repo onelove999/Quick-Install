@@ -4,7 +4,7 @@
 # Запуск: curl -sSL https://raw.../setup.sh | sudo bash
 # ============================================================
 
-set -o pipefail
+set -Eeuo pipefail
 
 # ─── Цвета ─────────
 RED='\033[0;31m'
@@ -31,16 +31,37 @@ info "Скачивание файлов утилиты..."
 # Устанавливаем git если нет
 if ! command -v git &>/dev/null; then
     info "Установка Git..."
-    apt-get update -qq && apt-get install -y git -qq
+    if ! command -v apt-get &>/dev/null; then
+        error "Автоматическая установка поддерживает Debian/Ubuntu (apt-get)."
+        exit 1
+    fi
+    apt-get update -qq
+    apt-get install -y -qq git ca-certificates
 fi
 
 # Клонируем или обновляем репо
-if [ -d "$INSTALL_DIR" ]; then
+if [ -e "$INSTALL_DIR" ]; then
+    if [ ! -d "$INSTALL_DIR/.git" ]; then
+        error "$INSTALL_DIR уже существует, но не является Git-репозиторием."
+        error "Удалите или переместите каталог вручную и повторите установку."
+        exit 1
+    fi
+    current_remote=$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)
+    if [ "$current_remote" != "$REPO_URL" ]; then
+        error "Неожиданный origin у $INSTALL_DIR: ${current_remote:-не задан}"
+        exit 1
+    fi
+    if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
+        error "В $INSTALL_DIR есть локальные изменения; автоматическое обновление их не удаляет."
+        error "Сохраните изменения или восстановите чистое состояние репозитория вручную."
+        exit 1
+    fi
     info "Обновление файлов в $INSTALL_DIR (принудительно)..."
-    cd "$INSTALL_DIR" && git fetch --all >/dev/null 2>&1 && git reset --hard origin/main >/dev/null 2>&1
+    git -C "$INSTALL_DIR" fetch --prune origin main
+    git -C "$INSTALL_DIR" reset --hard origin/main
 else
     info "Клонирование репозитория в $INSTALL_DIR..."
-    git clone -q "$REPO_URL" "$INSTALL_DIR"
+    git clone --depth 1 --branch main "$REPO_URL" "$INSTALL_DIR"
 fi
 
 if [ ! -f "${INSTALL_DIR}/src/main.sh" ]; then
@@ -48,22 +69,27 @@ if [ ! -f "${INSTALL_DIR}/src/main.sh" ]; then
     exit 1
 fi
 
-chmod +x "${INSTALL_DIR}"/src/*.sh
+chmod 0755 "${INSTALL_DIR}"/src/*.sh
 
 # Создаем алиас (симлинк не всегда стабилен, сделаем прокси-скрипт)
-cat > "$BIN_PATH" <<EOF
+launcher_tmp=$(mktemp "${BIN_PATH}.tmp.XXXXXX")
+cat > "$launcher_tmp" <<EOF
 #!/bin/bash
 if [ "\$(id -u)" -ne 0 ]; then
     echo -e "${RED}[✘]${NC} Утилиту нужно запускать от root (sudo qi)"
     exit 1
 fi
-exec bash "${INSTALL_DIR}/src/main.sh"
+exec bash "${INSTALL_DIR}/src/main.sh" "\$@"
 EOF
-chmod +x "$BIN_PATH"
+chmod 0755 "$launcher_tmp"
+mv -f "$launcher_tmp" "$BIN_PATH"
 
 success "Установка QI завершена!"
 info "Теперь для вызова меню просто пишите в терминале: ${GREEN}${BIN_NAME}${NC}"
 echo ""
 
-# Запускаем сразу после установки
-exec "$BIN_PATH"
+# При установке через curl | bash stdin уже закрыт — меню запускать нельзя.
+if [ -t 0 ] && [ -t 1 ]; then
+    exec "$BIN_PATH"
+fi
+info "Для запуска интерактивного меню выполните: ${GREEN}sudo ${BIN_NAME}${NC}"

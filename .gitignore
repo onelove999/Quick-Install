@@ -1,0 +1,100 @@
+# -----------------------------------------------------------------------------
+# Quick-Install: локальные и чувствительные файлы
+# -----------------------------------------------------------------------------
+
+# Ansible намеренно не хранится в этом репозитории
+/ansible/
+
+# Переменные окружения и секреты
+.env
+.env.*
+!.env.example
+!.env.sample
+.secrets/
+secrets/
+credentials*.json
+service-account*.json
+vault-password*
+.vault_pass*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+
+# Локальная конфигурация и данные VPN Guard
+/vpnguard/config/config.yaml
+/vpnguard/vpnguard.yaml
+/vpnguard/docker-compose.override.yml
+/vpnguard/guard_alerts.log
+/vpnguard/reports/
+/vpnguard/qwen/
+
+# Артефакты сборки и тестирования Go
+/vpnguard/vpnguard
+/vpnguard/*.exe
+/vpnguard/*.test
+/vpnguard/coverage*.out
+/vpnguard/profiles/
+
+# Логи, PID и runtime-файлы
+*.log
+*.log.*
+*.pid
+*.pid.lock
+*.sock
+/logs/
+
+# Временные файлы, резервные копии и результаты конфликтов
+*.tmp
+*.temp
+*.bak
+*.backup
+*.orig
+*.rej
+*.swp
+*.swo
+*~
+/.cache/
+/tmp/
+/temp/
+
+# Общие каталоги сборки и отчётов
+/build/
+/dist/
+/out/
+/coverage/
+
+# Python-кэш, если запускаются вспомогательные скрипты
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Локальные настройки AI-инструментов
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/.gemini/
+
+# IDE и редакторы
+/.idea/
+/.vscode/
+/.fleet/
+/.history/
+*.iml
+*.code-workspace
+
+# Файлы операционных систем
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.directory

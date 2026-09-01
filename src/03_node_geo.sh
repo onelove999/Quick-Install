@@ -15,13 +15,8 @@ do_install_node() {
     fi
 
     # 1. Docker
-    if command -v docker &>/dev/null; then
-        info "Docker уже установлен: $(docker --version)"
-    else
-        info "Установка Docker..."
-        curl -fsSL https://get.docker.com | sh
-        success "Docker установлен."
-    fi
+    ensure_docker || { error "Без Docker установка ноды невозможна."; press_enter; return 1; }
+    info "Docker готов: $(docker --version)"
 
     # 2. Создание папки
     mkdir -p "$REMNA_DIR"
@@ -40,11 +35,17 @@ do_install_node() {
 
     info "Сейчас откроется nano для редактирования docker-compose.yml"
     info "Вставьте ваш конфиг и сохраните (Ctrl+O, Enter, Ctrl+X)"
-    sleep 2
+    require_commands nano || { press_enter; return 1; }
+    sleep 1
     nano "$COMPOSE_FILE"
+    chmod 0600 "$COMPOSE_FILE" 2>/dev/null || true
 
     if [ -f "$COMPOSE_FILE" ] && [ -s "$COMPOSE_FILE" ]; then
-        success "docker-compose.yml сохранён."
+        if compose_validate "$REMNA_DIR"; then
+            success "docker-compose.yml сохранён и прошёл проверку."
+        else
+            error "docker-compose.yml содержит ошибку. Исправьте файл перед запуском ноды."
+        fi
     else
         warn "docker-compose.yml пуст или не создан."
     fi
@@ -61,11 +62,15 @@ do_start_node() {
     fi
 
     info "Запуск контейнера..."
-    measure_time bash -c "cd '$REMNA_DIR' && docker compose up -d"
+    if ! measure_time compose_run "$REMNA_DIR" up -d; then
+        error "Не удалось запустить контейнер."
+        press_enter
+        return 1
+    fi
 
     success "Контейнер запущен. Показываю логи (Ctrl+C для выхода)..."
     echo ""
-    cd "$REMNA_DIR" && docker compose logs -f -t || true
+    compose_run "$REMNA_DIR" logs -f -t || true
 }
 
 do_update_node() {
@@ -78,14 +83,22 @@ do_update_node() {
     fi
 
     info "Подтягивание новых образов (docker compose pull)..."
-    measure_time bash -c "cd '$REMNA_DIR' && docker compose pull"
+    if ! measure_time compose_run "$REMNA_DIR" pull; then
+        error "Не удалось скачать новые образы; работающий контейнер не изменён."
+        press_enter
+        return 1
+    fi
     
     info "Перезапуск контейнера..."
-    measure_time bash -c "cd '$REMNA_DIR' && docker compose down && docker compose up -d"
+    if ! measure_time compose_run "$REMNA_DIR" up -d --remove-orphans; then
+        error "Не удалось применить обновление."
+        press_enter
+        return 1
+    fi
     
     success "Обновление завершено. Показываю логи (Ctrl+C для выхода)..."
     echo ""
-    cd "$REMNA_DIR" && docker compose logs -f -t || true
+    compose_run "$REMNA_DIR" logs -f -t || true
 }
 
 do_show_docker_logs() {
@@ -97,7 +110,7 @@ do_show_docker_logs() {
     fi
     info "Выход: Ctrl+C"
     echo ""
-    (trap - INT; cd "$REMNA_DIR" && docker compose logs -f)
+    (trap - INT; compose_run "$REMNA_DIR" logs -f)
 }
 
 do_stop_node() {
@@ -108,7 +121,7 @@ do_stop_node() {
         return
     fi
     info "Остановка и удаление контейнеров..."
-    cd "$REMNA_DIR" && docker compose down
+    compose_run "$REMNA_DIR" down || { error "Не удалось остановить ноду."; press_enter; return 1; }
     success "Нода остановлена."
     press_enter
 }
@@ -121,7 +134,7 @@ do_restart_node() {
         return
     fi
     info "Перезапуск (down + up)..."
-    cd "$REMNA_DIR" && docker compose down && docker compose up -d
+    compose_run "$REMNA_DIR" restart || { error "Не удалось перезапустить ноду."; press_enter; return 1; }
     success "Нода перезапущена."
     press_enter
 }
@@ -134,9 +147,18 @@ do_edit_node_compose() {
         return
     fi
     info "Открываю nano для редактирования $COMPOSE_FILE..."
+    require_commands nano || { press_enter; return 1; }
+    cp -p "$COMPOSE_FILE" "${COMPOSE_FILE}.bak"
+    chmod 0600 "${COMPOSE_FILE}.bak" 2>/dev/null || true
     sleep 1
     nano "$COMPOSE_FILE"
-    success "Редактирование завершено."
+    chmod 0600 "$COMPOSE_FILE" 2>/dev/null || true
+    if compose_validate "$REMNA_DIR"; then
+        success "Редактирование завершено; Compose-конфигурация корректна."
+    else
+        cp -p "${COMPOSE_FILE}.bak" "$COMPOSE_FILE"
+        error "Compose-конфигурация некорректна; восстановлена резервная копия."
+    fi
     press_enter
 }
 
@@ -146,6 +168,7 @@ do_download_geo() {
     # 1. Запросить ссылку
     read -rp "$(printf "${CYAN}Введите ссылку на geo файл: ${NC}")" geo_url
     if [ -z "$geo_url" ]; then error "Отменено."; return; fi
+    if [[ ! "$geo_url" =~ ^https:// ]]; then error "Разрешены только HTTPS-ссылки."; press_enter; return 1; fi
 
     # 2. Скачать и добавить в папку
     local geo_dir="${REMNA_DIR}/geo"
@@ -154,10 +177,14 @@ do_download_geo() {
     # Получаем имя файла из ссылки
     local filename
     filename=$(basename "${geo_url%%\?*}")
-    if [ -z "$filename" ]; then error "Не удалось определить имя файла."; press_enter; return; fi
+    if [ -z "$filename" ] || ! [[ "$filename" =~ ^[A-Za-z0-9._-]+$ ]] || [ "$filename" = "." ] || [ "$filename" = ".." ]; then
+        error "Небезопасное или пустое имя файла в URL."
+        press_enter
+        return 1
+    fi
 
     info "Скачивание $filename в $geo_dir..."
-    if ! wget -qO "${geo_dir}/${filename}" "$geo_url"; then
+    if ! download_atomic "$geo_url" "${geo_dir}/${filename}"; then
         error "Ошибка при скачивании файла!"
         press_enter
         return
@@ -167,19 +194,18 @@ do_download_geo() {
     # Сохраняем ссылку в urls.txt
     local urls_file="${geo_dir}/urls.txt"
     touch "$urls_file"
-    grep -v "^${filename}|" "$urls_file" > "${urls_file}.tmp" 2>/dev/null || true
+    awk -F'|' -v name="$filename" '$1 != name' "$urls_file" > "${urls_file}.tmp" 2>/dev/null || true
     echo "${filename}|${geo_url}" >> "${urls_file}.tmp"
     mv "${urls_file}.tmp" "$urls_file"
     info "Ссылка на файл сохранена."
 
     # 3. Прописать в docker-compose.yml
     if [ -f "$COMPOSE_FILE" ]; then
-        if grep -q "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
+        if grep -Fq "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
             info "Volume для $filename уже прописан."
             read -rp "$(printf "${YELLOW}Перезапустить контейнер для применения обновлённого файла? [y/N]: ${NC}")" restart_confirm
             if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
-                cd "$REMNA_DIR" && docker compose down && docker compose up -d
-                success "Контейнер перезапущен."
+                if compose_run "$REMNA_DIR" up -d; then success "Контейнер перезапущен."; else error "Ошибка перезапуска."; fi
             fi
         else
             read -rp "$(printf "${CYAN}Путь внутри контейнера [По умолчанию: /usr/local/share/xray]: ${NC}")" container_path
@@ -188,6 +214,8 @@ do_download_geo() {
 
             local volume_mapping="${geo_dir}/${filename}:${container_path}/${filename}:ro"
             info "Добавляю $filename в volumes..."
+            cp -p "$COMPOSE_FILE" "${COMPOSE_FILE}.bak"
+            chmod 0600 "${COMPOSE_FILE}.bak" 2>/dev/null || true
 
             if grep -E -q '^[ \t]+volumes:' "$COMPOSE_FILE"; then
                 awk -v vol="      - \"${volume_mapping}\"" '/^[ \t]+volumes:/ && !done { print; print vol; done=1; next } 1' "$COMPOSE_FILE" > "${COMPOSE_FILE}.tmp" && mv "${COMPOSE_FILE}.tmp" "$COMPOSE_FILE"
@@ -199,14 +227,17 @@ do_download_geo() {
                 warn "Не найдено место для автоматического добавления volume."
                 warn "Добавьте строку '- \"${volume_mapping}\"' в docker-compose.yml вручную."
             fi
+            chmod 0600 "$COMPOSE_FILE" 2>/dev/null || true
 
-            if grep -q "${geo_dir}/${filename}" "$COMPOSE_FILE"; then
+            if grep -Fq "${geo_dir}/${filename}" "$COMPOSE_FILE" && compose_validate "$REMNA_DIR"; then
                 success "docker-compose.yml обновлен."
                 read -rp "$(printf "${YELLOW}Перезапустить контейнер для применения изменений? [y/N]: ${NC}")" restart_confirm
                 if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
-                    cd "$REMNA_DIR" && docker compose down && docker compose up -d
-                    success "Контейнер перезапущен."
+                    if compose_run "$REMNA_DIR" up -d; then success "Контейнер перезапущен."; else error "Ошибка перезапуска."; fi
                 fi
+            else
+                cp -p "${COMPOSE_FILE}.bak" "$COMPOSE_FILE"
+                error "Не удалось безопасно обновить Compose; восстановлена резервная копия."
             fi
         fi
     fi
@@ -232,9 +263,11 @@ do_update_all_geo() {
     while IFS='|' read -r filename url || [ -n "$filename" ]; do
         [ -z "$filename" ] || [ -z "$url" ] && continue
         info "[$((count+1))/$total] Скачивание $filename..."
-        if wget -qO "${geo_dir}/${filename}" "$url"; then
+        if [[ "$url" =~ ^https:// ]] && [[ "$filename" =~ ^[A-Za-z0-9._-]+$ ]] && download_atomic "$url" "${geo_dir}/${filename}"; then
             success "$filename обновлен."
             count=$((count + 1))
+        else
+            error "$filename не обновлён; предыдущий файл сохранён."
         fi
     done < "$urls_file"
 
@@ -242,8 +275,7 @@ do_update_all_geo() {
         success "Обновлено файлов: $count"
         read -rp "$(printf "${YELLOW}Перезапустить контейнер для применения изменений? [y/N]: ${NC}")" restart_confirm
         if [[ "$restart_confirm" =~ ^[Yy]$ ]]; then
-            cd "$REMNA_DIR" && docker compose restart
-            success "Контейнер перезапущен."
+            if compose_run "$REMNA_DIR" restart; then success "Контейнер перезапущен."; else error "Ошибка перезапуска."; fi
         fi
     fi
     press_enter
@@ -274,10 +306,19 @@ manage_geo_autoupdate() {
 GEO_DIR="${REMNA_DIR}/geo"
 URLS_FILE="\${GEO_DIR}/urls.txt"
 if [ -f "\$URLS_FILE" ]; then
+    changed=0
     while IFS='|' read -r filename url; do
-        wget -qO "\${GEO_DIR}/\${filename}" "\$url"
+        case "\$filename" in *[!A-Za-z0-9._-]*|.|..) continue ;; esac
+        case "\$url" in https://*) ;; *) continue ;; esac
+        tmp=\$(mktemp "\${GEO_DIR}/\${filename}.tmp.XXXXXX") || continue
+        if curl -fL --connect-timeout 10 --retry 2 "\$url" -o "\$tmp" && [ -s "\$tmp" ]; then
+            mv -f "\$tmp" "\${GEO_DIR}/\${filename}"
+            changed=1
+        else
+            rm -f "\$tmp"
+        fi
     done < "\$URLS_FILE"
-    cd "${REMNA_DIR}" && docker compose restart
+    [ "\$changed" -eq 1 ] && cd "${REMNA_DIR}" && docker compose restart
 fi
 EOF
             chmod +x "$cron_script"
@@ -308,13 +349,12 @@ menu_geo() {
     while true; do
         clear
         header "Управление Geo файлами" "Нода"
-        printf "${BOLD}  1)${NC} Загрузить новый Geo файл\n"
-        printf "${BOLD}  2)${NC} Обновить все сохраненные файлы (ручной)\n"
-        printf "${BOLD}  3)${NC} Настройка автообновления (cron)\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "GeoIP / GeoSite"
+        menu_item 1 "Добавить Geo-файл"
+        menu_item 2 "Обновить все Geo-файлы"
+        menu_item 3 "Настроить автообновление"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_download_geo ;;
@@ -331,22 +371,20 @@ menu_node() {
         clear
         header "Управление Нодой" "Главное меню"
         
-        printf "${BLUE}─── Операции ─────────────────── $(get_docker_status "remnanode") ──${NC}\n"
-        printf "${BOLD}  1)${NC} Запустить (с логами)\n"
-        printf "${BOLD}  2)${NC} Перезапустить\n"
-        printf "${BOLD}  3)${NC} Остановить\n"
-        printf "${BOLD}  4)${NC} Только логи контейнера\n"
-        printf "${BOLD}  5)${NC} Логи подключений (access.log)\n"
+        menu_section "Состояние: $(get_docker_status "remnanode")"
+        menu_item 1 "Запустить и показать логи"
+        menu_item 2 "Перезапустить"
+        menu_item 3 "Остановить"
+        menu_item 4 "Показать логи контейнера"
+        menu_item 5 "Показать access.log"
         echo ""
-        printf "${BLUE}─── Настройка ───────────────────────────────────────${NC}\n"
-        printf "${BOLD}  6)${NC} Установка ноды (Docker + Compose)\n"
-        printf "${BOLD}  7)${NC} Обновить ноду (Docker Pull)\n"
-        printf "${BOLD}  8)${NC} Редактировать docker-compose.yml\n"
-        printf "${BOLD}  9)${NC} Управление Geo файлами\n"
-        echo ""
-        printf "${BOLD}  0)${NC} ← Назад\n"
-        echo ""
-        read -rp "$(printf "${CYAN}Выберите действие: ${NC}")" choice
+        menu_section "Установка и конфигурация"
+        menu_item 6 "Установить ноду"
+        menu_item 7 "Обновить образы ноды"
+        menu_item 8 "Редактировать docker-compose.yml"
+        menu_item 9 "Управлять Geo-файлами"
+        menu_back
+        read_choice choice
 
         case "$choice" in
             1) do_start_node ;;
@@ -363,4 +401,3 @@ menu_node() {
         esac
     done
 }
-
